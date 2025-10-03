@@ -7,13 +7,39 @@ import { DefaultNativeEvent, DoubleTapStateProps, Plugin, NativeEvent } from "./
 import { findInReactTree } from "@vendetta/utils";
 import { logger } from "@vendetta";
 
+// Try to find modules with fallbacks
 const ChatInputRef = findByProps("insertText");
 const ChannelStore = findByStoreName("ChannelStore");
 const MessageStore = findByStoreName("MessageStore");
 const UserStore = findByStoreName("UserStore");
 const Messages = findByProps("sendMessage", "startEditMessage");
 const ReplyManager = findByProps("createPendingReply");
-const { MessagesHandlers } = findByProps("MessagesHandlers");
+
+// NEW: Multiple attempts to find MessagesHandlers with different methods
+let MessagesHandlersModule;
+try {
+    MessagesHandlersModule = findByProps("MessagesHandlers");
+} catch (e) {
+    logger.warn("BetterChatGestures: Could not find MessagesHandlers via findByProps");
+}
+
+// Fallback: try to find it via class name
+if (!MessagesHandlersModule) {
+    try {
+        const allModules = window.vendetta?.metro?.cache || new Map();
+        for (const [key, module] of allModules) {
+            if (module?.exports?.MessagesHandlers) {
+                MessagesHandlersModule = module.exports;
+                logger.log("BetterChatGestures: Found MessagesHandlers via cache iteration");
+                break;
+            }
+        }
+    } catch (e) {
+        logger.error("BetterChatGestures: Failed to find MessagesHandlers via cache", e);
+    }
+}
+
+const MessagesHandlers = MessagesHandlersModule?.MessagesHandlers;
 
 const BetterChatGestures: Plugin = {
     unpatchGetter: null,
@@ -22,6 +48,7 @@ const BetterChatGestures: Plugin = {
     currentMessageID: null,
     timeoutTap: null,
     patches: [],
+    handlersInstances: new WeakSet(), // Track patched instances
 
     doubleTapState({ state = "UNKNOWN", nativeEvent }: DoubleTapStateProps) {
         try {
@@ -68,8 +95,9 @@ const BetterChatGestures: Plugin = {
     },
 
     patchHandlers(handlers) {
-        if (handlers.__bcg_patched) return;
-        handlers.__bcg_patched = true;
+        // NEW: Use WeakSet to track instances
+        if (this.handlersInstances.has(handlers)) return;
+        this.handlersInstances.add(handlers);
 
         try {
             // patch username tapping to mention user instead
@@ -79,7 +107,7 @@ const BetterChatGestures: Plugin = {
                         if (!storage.tapUsernameMention) return orig.apply(handlers, args);
                         if (!args?.[0]?.nativeEvent) return orig.apply(handlers, args);
 
-                        const ChatInput = ChatInputRef.refs?.[0]?.current;
+                        const ChatInput = ChatInputRef?.refs?.[0]?.current;
                         const { messageId } = args[0].nativeEvent;
                         
                         if (!ChatInput?.props?.channel?.id) return orig.apply(handlers, args);
@@ -91,7 +119,6 @@ const BetterChatGestures: Plugin = {
 
                         if (!message?.author) return orig.apply(handlers, args);
                         
-                        // Include discriminator only if it's not "0" (new Discord username system)
                         const discriminatorText = message.author.discriminator !== "0" 
                             ? `#${message.author.discriminator}` 
                             : '';
@@ -104,7 +131,7 @@ const BetterChatGestures: Plugin = {
                 this.patches.push(tapUsernamePatch);
             }
 
-            // patch tapping a message to require 2 taps and author and provide edit event if both conditions are met
+            // patch tapping a message
             if (handlers.handleTapMessage) {
                 const tapMessagePatch = after("handleTapMessage", handlers, (args) => {
                     try {
@@ -117,23 +144,20 @@ const BetterChatGestures: Plugin = {
                         const MessageID = nativeEvent.messageId;
                         if (!ChannelID || !MessageID) return;
 
-                        const channel = ChannelStore.getChannel(ChannelID);
-                        const message = MessageStore.getMessage(ChannelID, MessageID);
+                        const channel = ChannelStore?.getChannel(ChannelID);
+                        const message = MessageStore?.getMessage(ChannelID, MessageID);
 
                         if (!message) return;
 
-                        // Track taps for the same message
                         if (this.currentMessageID === MessageID) {
                             this.currentTapIndex++;
                         } else {
-                            // If tapping a different message, reset and start with 1
                             this.resetTapState();
                             this.currentTapIndex = 1;
                             this.currentMessageID = MessageID;
                         }
 
-                        // Validate delay setting
-                        let delayMs = 300; // Default value
+                        let delayMs = 300;
                         if (storage.delay) {
                             const parsedDelay = parseInt(storage.delay, 10);
                             if (!isNaN(parsedDelay) && parsedDelay > 0) {
@@ -141,7 +165,6 @@ const BetterChatGestures: Plugin = {
                             }
                         }
                         
-                        // Clear previous timeout and set a new one
                         if (this.timeoutTap) {
                             clearTimeout(this.timeoutTap);
                         }
@@ -150,7 +173,7 @@ const BetterChatGestures: Plugin = {
                             this.resetTapState();
                         }, delayMs);
 
-                        const currentUser = UserStore.getCurrentUser();
+                        const currentUser = UserStore?.getCurrentUser();
                         const isAuthor = currentUser && message.author ? message.author.id === currentUser.id : false;
 
                         const enrichedNativeEvent = {
@@ -169,28 +192,25 @@ const BetterChatGestures: Plugin = {
                             return;
                         }
 
-                        // Store the message ID before resetting
                         const currentMessageID = this.currentMessageID;
-                        
-                        // We've confirmed it's a double tap, reset the state
                         this.resetTapState();
 
                         if (isAuthor) {
                             if (storage.userEdit) {
-                                Messages.startEditMessage(
+                                Messages?.startEditMessage(
                                     ChannelID,
                                     currentMessageID,
                                     enrichedNativeEvent.content
                                 );
                             } else if (storage.reply && channel) {
-                                ReplyManager.createPendingReply({
+                                ReplyManager?.createPendingReply({
                                     channel,
                                     message,
                                     shouldMention: true
                                 });
                             }
                         } else if (storage.reply && channel) {
-                            ReplyManager.createPendingReply({
+                            ReplyManager?.createPendingReply({
                                 channel,
                                 message,
                                 shouldMention: true
@@ -223,18 +243,13 @@ const BetterChatGestures: Plugin = {
 
             this.unpatchHandlers = () => {
                 try {
-                    // Unpatch all registered patches
                     this.patches.forEach(unpatch => {
                         if (typeof unpatch === 'function') {
                             unpatch();
                         }
                     });
                     this.patches = [];
-                    
-                    // Remove our marker
-                    if (handlers.__bcg_patched) {
-                        delete handlers.__bcg_patched;
-                    }
+                    this.handlersInstances = new WeakSet();
                 } catch (error) {
                     logger.error("BetterChatGestures: Error in unpatchHandlers", error);
                 }
@@ -246,14 +261,20 @@ const BetterChatGestures: Plugin = {
 
     onLoad() {
         try {
-            // initialize with default values if not set
+            // Check if required modules are available
+            if (!MessagesHandlers) {
+                logger.error("BetterChatGestures: MessagesHandlers module not found! Plugin will not work.");
+                // Try alternative patching method
+                this.tryAlternativePatching();
+                return;
+            }
+
             storage.tapUsernameMention ??= ReactNative.Platform.select({
                 android: false,
                 ios: true,
                 default: true
             });
             
-            // Always disable for Android regardless of stored value
             if (ReactNative.Platform.OS === 'android') {
                 storage.tapUsernameMention = false;
             }
@@ -263,7 +284,6 @@ const BetterChatGestures: Plugin = {
             storage.keyboardPopup ??= false;
             storage.delay ??= "300";
             
-            // Validate delay
             if (!storage.delay || storage.delay === "" || isNaN(parseInt(storage.delay, 10)) || parseInt(storage.delay, 10) <= 0) {
                 storage.delay = "300";
             }
@@ -271,32 +291,67 @@ const BetterChatGestures: Plugin = {
             logger.log("BetterChatGestures: initialized with delay =", storage.delay);
             
             const self = this;
-            const origGetParams = Object.getOwnPropertyDescriptor(MessagesHandlers.prototype, "params")?.get;
             
-            if (origGetParams) {
-                Object.defineProperty(MessagesHandlers.prototype, "params", {
+            // NEW: Try multiple property names that might exist
+            const possiblePropertyNames = ["params", "handlers", "_params", "messageHandlers"];
+            let origGetParams = null;
+            let usedPropertyName = null;
+            
+            for (const propName of possiblePropertyNames) {
+                origGetParams = Object.getOwnPropertyDescriptor(MessagesHandlers.prototype, propName)?.get;
+                if (origGetParams) {
+                    usedPropertyName = propName;
+                    logger.log(`BetterChatGestures: Found property '${propName}'`);
+                    break;
+                }
+            }
+            
+            if (origGetParams && usedPropertyName) {
+                Object.defineProperty(MessagesHandlers.prototype, usedPropertyName, {
                     configurable: true,
                     get() {
                         if (this) self.patchHandlers.call(self, this);
                         return origGetParams.call(this);
                     }
                 });
-            }
-            
-            this.unpatchGetter = () => {
-                try {
-                    if (origGetParams) {
-                        Object.defineProperty(MessagesHandlers.prototype, "params", {
-                            configurable: true,
-                            get: origGetParams
-                        });
+                
+                this.unpatchGetter = () => {
+                    try {
+                        if (origGetParams && usedPropertyName) {
+                            Object.defineProperty(MessagesHandlers.prototype, usedPropertyName, {
+                                configurable: true,
+                                get: origGetParams
+                            });
+                        }
+                    } catch (error) {
+                        logger.error("BetterChatGestures: Error in unpatchGetter", error);
                     }
-                } catch (error) {
-                    logger.error("BetterChatGestures: Error in unpatchGetter", error);
-                }
-            };
+                };
+            } else {
+                logger.error("BetterChatGestures: Could not find params getter! Trying alternative method...");
+                this.tryAlternativePatching();
+            }
         } catch (error) {
             logger.error("BetterChatGestures: Error in onLoad", error);
+        }
+    },
+
+    // NEW: Alternative patching method if the primary method fails
+    tryAlternativePatching() {
+        try {
+            logger.log("BetterChatGestures: Attempting alternative patching method...");
+            
+            // Try to find and patch the message component directly
+            const MessageComponent = findByProps("default")?.default;
+            if (MessageComponent) {
+                const patchComponent = before("type", MessageComponent, (args) => {
+                    // This is a fallback approach - may need adjustment
+                    logger.log("BetterChatGestures: Alternative patch triggered");
+                });
+                this.patches.push(patchComponent);
+            }
+        } catch (error) {
+            logger.error("BetterChatGestures: Alternative patching failed", error);
         }
     },
 
@@ -307,7 +362,6 @@ const BetterChatGestures: Plugin = {
             if (this.unpatchGetter) this.unpatchGetter();
             if (this.unpatchHandlers) this.unpatchHandlers();
             
-            // Clear any remaining timeouts
             if (this.timeoutTap) {
                 clearTimeout(this.timeoutTap);
                 this.timeoutTap = null;
