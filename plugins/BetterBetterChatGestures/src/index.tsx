@@ -95,8 +95,7 @@ const BetterChatGestures: Plugin = {
     },
 
     patchHandlers(handlers) {
-
-	console.log("BetterChatGestures: patchHandlers called with:", handlers);
+        console.log("BetterChatGestures: patchHandlers called with:", handlers);
 
         // NEW: Use WeakSet to track instances
         if (this.handlersInstances.has(handlers)) return;
@@ -134,10 +133,91 @@ const BetterChatGestures: Plugin = {
                 this.patches.push(tapUsernamePatch);
             }
 
-            // patch tapping a message
+            // NEW: Patch handleDoubleTapMessage (Discord 294.18+)
+            if (handlers.handleDoubleTapMessage) {
+                console.log("BetterChatGestures: Patching handleDoubleTapMessage");
+                
+                const doubleTapPatch = instead("handleDoubleTapMessage", handlers, (args, orig) => {
+                    console.log("BetterChatGestures: handleDoubleTapMessage intercepted with args:", args);
+                    
+                    try {
+                        if (!args?.[0]?.nativeEvent) return orig.apply(handlers, args);
+                        
+                        const { nativeEvent } = args[0];
+                        const ChannelID = nativeEvent.channelId;
+                        const MessageID = nativeEvent.messageId;
+                        
+                        if (!ChannelID || !MessageID) return orig.apply(handlers, args);
+                        
+                        const channel = ChannelStore?.getChannel(ChannelID);
+                        const message = MessageStore?.getMessage(ChannelID, MessageID);
+                        
+                        if (!message) return orig.apply(handlers, args);
+                        
+                        const currentUser = UserStore?.getCurrentUser();
+                        const isAuthor = currentUser && message.author ? message.author.id === currentUser.id : false;
+                        
+                        console.log("BetterChatGestures: Double tap detected - isAuthor:", isAuthor, "userEdit:", storage.userEdit, "reply:", storage.reply);
+                        
+                        // Execute our custom logic instead of default behavior
+                        if (isAuthor && storage.userEdit) {
+                            console.log("BetterChatGestures: Starting edit for own message");
+                            Messages?.startEditMessage(
+                                ChannelID,
+                                MessageID,
+                                message.content || ''
+                            );
+                            
+                            if (storage.keyboardPopup) {
+                                try {
+                                    const keyboardModule = findByProps("openSystemKeyboard");
+                                    if (keyboardModule) keyboardModule.openSystemKeyboardForLastCreatedInput();
+                                } catch (error) {
+                                    logger.error("BetterChatGestures: Error opening keyboard", error);
+                                }
+                            }
+                            
+                            // Don't call original - we handled it
+                            return;
+                            
+                        } else if (storage.reply && channel) {
+                            console.log("BetterChatGestures: Creating reply");
+                            ReplyManager?.createPendingReply({
+                                channel,
+                                message,
+                                shouldMention: true
+                            });
+                            
+                            if (storage.keyboardPopup) {
+                                try {
+                                    const keyboardModule = findByProps("openSystemKeyboard");
+                                    if (keyboardModule) keyboardModule.openSystemKeyboardForLastCreatedInput();
+                                } catch (error) {
+                                    logger.error("BetterChatGestures: Error opening keyboard", error);
+                                }
+                            }
+                            
+                            // Don't call original - we handled it
+                            return;
+                        }
+                        
+                        // If none of our conditions matched, use default behavior
+                        console.log("BetterChatGestures: No custom action, using default behavior");
+                        return orig.apply(handlers, args);
+                        
+                    } catch (error) {
+                        logger.error("BetterChatGestures: Error in handleDoubleTapMessage patch", error);
+                        return orig.apply(handlers, args);
+                    }
+                });
+                
+                this.patches.push(doubleTapPatch);
+            }
+
+            // patch tapping a message (fallback for older Discord versions)
             if (handlers.handleTapMessage) {
                 const tapMessagePatch = after("handleTapMessage", handlers, (args) => {
-			console.log("BetterChatGestures: handleTapMessage called with args:", args);
+                    console.log("BetterChatGestures: handleTapMessage called with args:", args);
 
                     try {
                         if (!args?.[0]) return;
