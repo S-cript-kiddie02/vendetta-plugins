@@ -4,4 +4,4 @@ A Fork of [BetterChatGestures](https://github.com/MYSTRAVIL/vendetta-plugins), s
 Somewhat works (slow taps work but fast taps don't, so I recommend using 1000ms of delay).
 
 
-[BetterBetterChatGesturesV3](https://s-cript-kiddie02.github.io/vendetta-plugins/BetterBetterChatGestures)
+[BetterBetterChatGesturesV3](https://s-cript-kiddie02.github.io/vendetta-plugins/BetterBetterChatGesturesV3)
