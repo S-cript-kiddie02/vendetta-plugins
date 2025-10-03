@@ -95,6 +95,9 @@ const BetterChatGestures: Plugin = {
     },
 
     patchHandlers(handlers) {
+
+	console.log("BetterChatGestures: patchHandlers called with:", handlers);
+
         // NEW: Use WeakSet to track instances
         if (this.handlersInstances.has(handlers)) return;
         this.handlersInstances.add(handlers);
@@ -134,6 +137,8 @@ const BetterChatGestures: Plugin = {
             // patch tapping a message
             if (handlers.handleTapMessage) {
                 const tapMessagePatch = after("handleTapMessage", handlers, (args) => {
+			console.log("BetterChatGestures: handleTapMessage called with args:", args);
+
                     try {
                         if (!args?.[0]) return;
                         
