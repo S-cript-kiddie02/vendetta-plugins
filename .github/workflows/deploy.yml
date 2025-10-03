@@ -1,49 +1,81 @@
-name: Build and deploy
+name: Build and Deploy Plugins
 
 on:
-    push:
-        branches: [master]
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+# IMPORTANT : Permissions pour pousser sur gh-pages
+permissions:
+  contents: write
+  pages: write
+  id-token: write
 
 jobs:
-    deploy:
-        runs-on: ubuntu-latest
-        permissions:
-          contents: write
-
-        steps:
-            - uses: actions/checkout@v3
-
-            - name: Prepare environment
-              uses: actions/setup-node@v3
-              with:
-                  node-version: "16"
-
-            - run: npm install --global pnpm
-
-            - name: Install deps
-              run: pnpm m i
-
-            - name: Build plugin(s)
-              run: node ./build.mjs
-
-              # Foolproof feature:
-              # - Copies over README so that the root of the deployed website shows it
-              # - Changes 404 page to README so that you don't get lost while clicking links
-              # If you remove this step then you should probably remove the enable_jekyll option in the next one
-            - name: Copy additional files
-              run: |
-                  cp README.md dist/README.md
-                  printf -- "---\npermalink: /404.html\n---\n" > dist/404.md
-                  printf -- "> **Note:** You accessed a link that returned a 404. How did you end up here!?!\n\n" >> dist/404.md
-                  cat README.md >> dist/404.md
-
-              # Documentation: https://github.com/peaceiris/actions-gh-pages
-            - name: Deploy to GitHub Pages
-              uses: peaceiris/actions-gh-pages@v3
-              with:
-                  github_token: ${{ secrets.GITHUB_TOKEN }}
-                  publish_dir: ./dist
-                  # Makes it so the md files in the previous step get processed by GitHub Pages
-                  enable_jekyll: true
-                  # This creates the CNAME file required to host GitHub Pages on a custom domain
-                  # cname: example.com
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: 🟢 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          
+      - name: 📦 Setup pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 8
+          
+      - name: 📚 Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
+          
+      - name: 🔄 Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+            
+      - name: 📥 Install dependencies
+        run: pnpm install --no-frozen-lockfile
+        
+      - name: 🔨 Build plugins
+        run: pnpm run build
+        
+      - name: 📋 List built files (DEBUG)
+        run: |
+          echo "Contents of dist directory:"
+          ls -R dist/ || echo "dist/ does not exist!"
+          echo ""
+          echo "Checking manifest.json:"
+          cat dist/BetterBetterChatGestures/manifest.json || echo "manifest.json not found!"
+          
+      - name: ✅ Verify dist directory
+        run: |
+          if [ ! -d "dist" ]; then
+            echo "❌ Error: dist directory not created!"
+            exit 1
+          fi
+          if [ -z "$(ls -A dist)" ]; then
+            echo "❌ Error: dist directory is empty!"
+            exit 1
+          fi
+          echo "✅ dist directory exists and contains files"
+          
+      - name: 🚀 Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist
+          publish_branch: gh-pages
+          force_orphan: true
+          commit_message: 'Deploy plugins from commit ${{ github.sha }}'
+          user_name: 'github-actions[bot]'
+          user_email: 'github-actions[bot]@users.noreply.github.com'
