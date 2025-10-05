@@ -3,7 +3,7 @@ A Fork of [BetterChatGestures](https://github.com/MYSTRAVIL/vendetta-plugins), s
 
 2 types of behaviours :
 
-#Option 1 : Fast taps (desired behaviour)
+# Option 1 : Fast taps (desired behaviour)
 
 For it to work, you have to enable the "Double Tap to React" experiment by going to Settings > Experiments > "Double Tap to react" > Enable "Treatment 1: Enabled - Show Half Sheet Upsell" 
 
