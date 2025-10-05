@@ -1,78 +1,185 @@
-import {readFile, writeFile, readdir} from "fs/promises";
-import {createHash} from "crypto";
+import { build } from "esbuild";
+import { readdir, readFile, writeFile, mkdir, rm } from "fs/promises";
+import { join, resolve } from "path";
+import { fileURLToPath } from "url";
 
-import {rollup} from "rollup";
-import esbuild from "rollup-plugin-esbuild";
-import commonjs from "@rollup/plugin-commonjs";
-import nodeResolve from "@rollup/plugin-node-resolve";
-import swc from "@swc/core";
+const __dirname = fileURLToPath(new URL(".", import.meta.url));
+const PLUGINS_DIR = resolve(__dirname, "plugins");
+const DIST_DIR = resolve(__dirname, "dist");
 
-/** @type import("rollup").InputPluginOption */
-const plugins = [
-    nodeResolve(),
-    commonjs(),
-    {
-        name: "swc",
-        async transform(code, id) {
-            const result = await swc.transform(code, {
-                filename: id,
-                jsc: {
-                    externalHelpers: true,
-                    parser: {
-                        syntax: "typescript",
-                        tsx: true,
-                    },
-                },
-                env: {
-                    targets: "defaults",
-                    include: [
-                        "transform-classes",
-                        "transform-arrow-functions",
-                    ],
-                },
-            });
-            return result.code;
-        },
-    },
-    esbuild({minify: true}),
-];
-
-for (let plug of await readdir("./plugins")) {
-    const manifest = JSON.parse(await readFile(`./plugins/${plug}/manifest.json`));
-    const outPath = `./dist/${plug}/index.js`;
-
-    try {
-        const bundle = await rollup({
-            input: `./plugins/${plug}/${manifest.main}`,
-            onwarn: () => {
-            },
-            plugins,
-        });
-
-        await bundle.write({
-            file: outPath,
-            globals(id) {
-                if (id.startsWith("@vendetta")) return id.substring(1).replace(/\//g, ".");
-                const map = {
-                    react: "window.React",
-                };
-
-                return map[id] || null;
-            },
-            format: "iife",
-            compact: true,
-            exports: "named",
-        });
-        await bundle.close();
-
-        const toHash = await readFile(outPath);
-        manifest.hash = createHash("sha256").update(toHash).digest("hex");
-        manifest.main = "index.js";
-        await writeFile(`./dist/${plug}/manifest.json`, JSON.stringify(manifest));
-
-        console.log(`Successfully built ${manifest.name}!`);
-    } catch (e) {
-        console.error("Failed to build plugin...", e);
-        process.exit(1);
-    }
+async function buildPlugin(pluginName) {
+  console.log(`\n📦 Building ${pluginName}...`);
+  
+  const pluginDir = join(PLUGINS_DIR, pluginName);
+  const manifestPath = join(pluginDir, "manifest.json");
+  
+  // Lire le manifest
+  let manifest;
+  try {
+    const manifestContent = await readFile(manifestPath, "utf-8");
+    manifest = JSON.parse(manifestContent);
+  } catch (error) {
+    console.error(`❌ Cannot read manifest.json for ${pluginName}:`, error.message);
+    return false;
+  }
+  
+  // Créer le dossier de sortie
+  const outDir = join(DIST_DIR, pluginName);
+  await mkdir(outDir, { recursive: true });
+  
+  const outfile = join(outDir, "index.js");
+  const entryPoint = join(pluginDir, manifest.main);
+  
+  try {
+    // Build avec esbuild
+    await build({
+      entryPoints: [entryPoint],
+      outfile,
+      bundle: true,
+      format: "esm",
+      external: [
+        "@vendetta",
+        "@vendetta*",
+        "react",
+        "react-native",
+      ],
+      minify: true,
+      target: "esnext",
+      treeShaking: true,
+      logLevel: "info",
+    });
+    
+    console.log(`   ✓ Compiled ${manifest.main}`);
+  } catch (error) {
+    console.error(`   ❌ Build failed:`, error.message);
+    return false;
+  }
+  
+  // Calculer le hash SHA-256 du fichier compilé
+  const compiledCode = await readFile(outfile, "utf-8");
+  const { createHash } = await import("crypto");
+  const hash = createHash("sha256").update(compiledCode).digest("hex");
+  
+  console.log(`   ✓ Generated hash: ${hash}`);
+  
+  // Mettre à jour le hash dans le manifest
+  manifest.hash = hash;
+  
+  // Écrire le manifest avec le hash mis à jour
+  const manifestOutput = JSON.stringify(manifest, null, 2);
+  await writeFile(
+    join(outDir, "manifest.json"),
+    manifestOutput
+  );
+  
+  console.log(`   ✓ Wrote manifest.json with hash`);
+  console.log(`✅ Successfully built ${pluginName}`);
+  
+  return true;
 }
+
+async function main() {
+  console.log("🚀 Starting build process...\n");
+  
+  // Nettoyer le dossier dist
+  try {
+    await rm(DIST_DIR, { recursive: true, force: true });
+    console.log("🧹 Cleaned dist directory");
+  } catch (error) {
+    // Le dossier n'existe peut-être pas encore
+  }
+  
+  // Créer le dossier dist
+  await mkdir(DIST_DIR, { recursive: true });
+  
+  // Lire tous les plugins
+  let plugins;
+  try {
+    plugins = await readdir(PLUGINS_DIR);
+  } catch (error) {
+    console.error("❌ Cannot read plugins directory:", error.message);
+    process.exit(1);
+  }
+  
+  // Filtrer pour ne garder que les dossiers avec un manifest.json
+  const validPlugins = [];
+  for (const plugin of plugins) {
+    const manifestPath = join(PLUGINS_DIR, plugin, "manifest.json");
+    try {
+      await readFile(manifestPath);
+      validPlugins.push(plugin);
+    } catch {
+      // Pas de manifest, on ignore
+    }
+  }
+  
+  console.log(`📋 Found ${validPlugins.length} plugin(s):\n   - ${validPlugins.join("\n   - ")}\n`);
+  
+  // Builder chaque plugin
+  let successCount = 0;
+  let failCount = 0;
+  
+  for (const plugin of validPlugins) {
+    const success = await buildPlugin(plugin);
+    if (success) {
+      successCount++;
+    } else {
+      failCount++;
+    }
+  }
+  
+  // Générer index.html
+const indexHtml = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vendetta Plugins</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #1a1a1a;
+            color: #e0e0e0;
+        }
+        .plugin { background: #2a2a2a; padding: 20px; margin: 10px 0; border-radius: 8px; }
+        h1 { color: #5865F2; }
+        a { color: #5865F2; }
+    </style>
+</head>
+<body>
+    <h1>Vendetta Plugins Repository</h1>
+    ${validPlugins.map(plugin => `
+        <div class="plugin">
+            <h2>${plugin}</h2>
+            <p>Install URL: <code>https://s-cript-kiddie02.github.io/vendetta-plugins/${plugin}</code></p>
+            <a href="./${plugin}/manifest.json">manifest.json</a> | 
+            <a href="./${plugin}/index.js">index.js</a>
+        </div>
+    `).join('')}
+</body>
+</html>`;
+
+await writeFile(join(DIST_DIR, "index.html"), indexHtml);
+console.log("✅ Generated index.html");
+
+  
+  // Résumé
+  console.log("\n" + "=".repeat(50));
+  console.log(`✅ ${successCount} plugin(s) built successfully`);
+  if (failCount > 0) {
+    console.log(`❌ ${failCount} plugin(s) failed`);
+  }
+  console.log("=".repeat(50) + "\n");
+  
+  if (failCount > 0) {
+    process.exit(1);
+  }
+}
+
+main().catch((error) => {
+  console.error("❌ Build script failed:", error);
+  process.exit(1);
+});
