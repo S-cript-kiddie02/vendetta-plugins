@@ -15,7 +15,7 @@ const UserStore = findByStoreName("UserStore");
 const Messages = findByProps("sendMessage", "startEditMessage");
 const ReplyManager = findByProps("createPendingReply");
 
-// NEW: Multiple attempts to find MessagesHandlers with different methods
+// Multiple attempts to find MessagesHandlers with different methods
 let MessagesHandlersModule;
 try {
     MessagesHandlersModule = findByProps("MessagesHandlers");
@@ -48,7 +48,7 @@ const BetterChatGestures: Plugin = {
     currentMessageID: null,
     timeoutTap: null,
     patches: [],
-    handlersInstances: new WeakSet(), // Track patched instances
+    handlersInstances: new WeakSet(),
 
     doubleTapState({ state = "UNKNOWN", nativeEvent }: DoubleTapStateProps) {
         try {
@@ -94,64 +94,81 @@ const BetterChatGestures: Plugin = {
         }
     },
 
-    patchHandlers(handlers) {
-        console.log("BetterChatGestures: patchHandlers called");
-
-        // NEW: Use WeakSet to track instances
-        if (this.handlersInstances.has(handlers)) {
-            console.log("BetterChatGestures: Handlers already patched, skipping");
-            return;
+    // Improved keyboard opening function with multiple fallbacks
+    openKeyboard() {
+        if (!storage.keyboardPopup) return;
+        
+        try {
+            // Method 1: Try openSystemKeyboard module
+            const keyboardModule = findByProps("openSystemKeyboard");
+            
+            if (keyboardModule?.openSystemKeyboard) {
+                keyboardModule.openSystemKeyboard();
+                return;
+            }
+            
+            if (keyboardModule?.openSystemKeyboardForLastCreatedInput) {
+                keyboardModule.openSystemKeyboardForLastCreatedInput();
+                return;
+            }
+            
+            // Method 2: Try focusing the chat input directly
+            const ChatInput = ChatInputRef?.refs?.[0]?.current;
+            if (ChatInput?.focus) {
+                ChatInput.focus();
+                return;
+            }
+            
+            // Method 3: Try React Native Keyboard API
+            if (ReactNative.Keyboard?.dismiss) {
+                // Dismiss then re-open to force focus
+                setTimeout(() => {
+                    if (ChatInput?.focus) {
+                        ChatInput.focus();
+                    }
+                }, 50);
+            }
+        } catch (error) {
+            // Silently fail - keyboard opening is a nice-to-have feature
+            if (storage.debugMode) {
+                logger.error("BetterChatGestures: Error opening keyboard", error);
+            }
         }
+    },
+
+    patchHandlers(handlers) {
+        if (this.handlersInstances.has(handlers)) return;
         this.handlersInstances.add(handlers);
 
         try {
-            // CRITICAL: Intercept native double-tap handler with our custom logic
-            // This handles FAST double taps (boom-boom)
+            // Intercept native double-tap handler - handles FAST double taps
             if (handlers.handleDoubleTapMessage) {
-                console.log("BetterChatGestures: Patching handleDoubleTapMessage with custom logic");
-                
                 const doubleTapPatch = instead("handleDoubleTapMessage", handlers, (args, orig) => {
-                    console.log("BetterChatGestures: Native double-tap intercepted (FAST tap)!");
-                    
                     try {
-                        if (!args?.[0]?.nativeEvent) {
-                            console.log("BetterChatGestures: No nativeEvent in fast tap");
-                            return;
-                        }
+                        if (!args?.[0]?.nativeEvent) return;
                         
                         const { nativeEvent } = args[0];
                         const ChannelID = nativeEvent.channelId;
                         const MessageID = nativeEvent.messageId;
                         
-                        if (!ChannelID || !MessageID) {
-                            console.log("BetterChatGestures: No channel/message ID in fast tap");
-                            return;
-                        }
+                        if (!ChannelID || !MessageID) return;
                         
                         const channel = ChannelStore?.getChannel(ChannelID);
                         const message = MessageStore?.getMessage(ChannelID, MessageID);
                         
-                        if (!message) {
-                            console.log("BetterChatGestures: Message not found in fast tap");
-                            return;
-                        }
+                        if (!message) return;
                         
                         const currentUser = UserStore?.getCurrentUser();
                         const isAuthor = currentUser && message.author ? message.author.id === currentUser.id : false;
                         
-                        console.log("BetterChatGestures: Fast double-tap detected!");
-                        console.log("BetterChatGestures: isAuthor:", isAuthor, "userEdit:", storage.userEdit, "reply:", storage.reply);
-                        
-                        // Execute our custom logic
+                        // Execute custom logic
                         if (isAuthor && storage.userEdit) {
-                            console.log("BetterChatGestures: Fast tap - Starting edit on own message");
                             Messages?.startEditMessage(
                                 ChannelID,
                                 MessageID,
                                 message.content || ''
                             );
                         } else if (storage.reply && channel) {
-                            console.log("BetterChatGestures: Fast tap - Creating reply");
                             ReplyManager?.createPendingReply({
                                 channel,
                                 message,
@@ -159,21 +176,7 @@ const BetterChatGestures: Plugin = {
                             });
                         }
                         
-                        if ((isAuthor && (storage.userEdit || storage.reply)) || (!isAuthor && storage.reply)) {
-                            if (storage.keyboardPopup) {
-                                try {
-                                    const keyboardModule = findByProps("openSystemKeyboard");
-                                    if (keyboardModule) {
-                                        console.log("BetterChatGestures: Opening keyboard (fast tap)");
-                                        keyboardModule.openSystemKeyboardForLastCreatedInput();
-                                    }
-                                } catch (error) {
-                                    logger.error("BetterChatGestures: Error opening keyboard", error);
-                                }
-                            }
-                        }
-                        
-                        // Don't call original - we handled it
+                        this.openKeyboard();
                         return;
                         
                     } catch (error) {
@@ -184,7 +187,7 @@ const BetterChatGestures: Plugin = {
                 this.patches.push(doubleTapPatch);
             }
 
-            // patch username tapping to mention user instead
+            // Patch username tapping
             if (handlers.handleTapUsername && storage.tapUsernameMention) {
                 const tapUsernamePatch = instead("handleTapUsername", handlers, (args, orig) => {
                     try {
@@ -215,55 +218,37 @@ const BetterChatGestures: Plugin = {
                 this.patches.push(tapUsernamePatch);
             }
 
-            // patch tapping a message - this handles SLOW double taps (boom... boom)
+            // Patch tap message - handles SLOW double taps
             if (handlers.handleTapMessage) {
-                console.log("BetterChatGestures: Patching handleTapMessage");
-                
                 const tapMessagePatch = after("handleTapMessage", handlers, (args) => {
-                    console.log("BetterChatGestures: handleTapMessage triggered");
-
                     try {
-                        if (!args?.[0]) {
-                            console.log("BetterChatGestures: No args, returning");
-                            return;
-                        }
+                        if (!args?.[0]) return;
                         
                         const { nativeEvent }: { nativeEvent: DefaultNativeEvent } = args[0];
-                        if (!nativeEvent) {
-                            console.log("BetterChatGestures: No nativeEvent, returning");
-                            return;
-                        }
+                        if (!nativeEvent) return;
                         
                         const ChannelID = nativeEvent.channelId;
                         const MessageID = nativeEvent.messageId;
-                        if (!ChannelID || !MessageID) {
-                            console.log("BetterChatGestures: No channel or message ID, returning");
-                            return;
-                        }
+                        if (!ChannelID || !MessageID) return;
 
                         const channel = ChannelStore?.getChannel(ChannelID);
                         const message = MessageStore?.getMessage(ChannelID, MessageID);
 
-                        if (!message) {
-                            console.log("BetterChatGestures: Message not found, returning");
-                            return;
-                        }
+                        if (!message) return;
 
-                        // Track taps for the same message
+                        // Track taps
                         if (this.currentMessageID === MessageID) {
                             this.currentTapIndex++;
-                            console.log(`BetterChatGestures: Tap #${this.currentTapIndex} on same message`);
                         } else {
                             this.resetTapState();
                             this.currentTapIndex = 1;
                             this.currentMessageID = MessageID;
-                            console.log("BetterChatGestures: First tap on new message");
                         }
 
-                        let delayMs = 1000; // Default to 1 second for better UX
+                        let delayMs = 1000;
                         if (storage.delay) {
                             const parsedDelay = parseInt(storage.delay, 10);
-                            if (!isNaN(parsedDelay) && parsedDelay > 0) {
+                            if (!isNaN(parsedDelay) && parsedDelay >= 200) {
                                 delayMs = parsedDelay;
                             }
                         }
@@ -273,7 +258,6 @@ const BetterChatGestures: Plugin = {
                         }
                         
                         this.timeoutTap = setTimeout(() => {
-                            console.log("BetterChatGestures: Tap timeout, resetting");
                             this.resetTapState();
                         }, delayMs);
 
@@ -296,23 +280,18 @@ const BetterChatGestures: Plugin = {
                             return;
                         }
 
-                        // SLOW DOUBLE TAP DETECTED!
-                        console.log("BetterChatGestures: Slow double-tap detected!");
-                        console.log("BetterChatGestures: isAuthor:", isAuthor, "userEdit:", storage.userEdit, "reply:", storage.reply);
-
+                        // Double tap detected!
                         const currentMessageID = this.currentMessageID;
                         this.resetTapState();
 
                         if (isAuthor) {
                             if (storage.userEdit) {
-                                console.log("BetterChatGestures: Slow tap - Starting edit on own message");
                                 Messages?.startEditMessage(
                                     ChannelID,
                                     currentMessageID,
                                     enrichedNativeEvent.content
                                 );
                             } else if (storage.reply && channel) {
-                                console.log("BetterChatGestures: Slow tap - Creating reply to own message");
                                 ReplyManager?.createPendingReply({
                                     channel,
                                     message,
@@ -320,7 +299,6 @@ const BetterChatGestures: Plugin = {
                                 });
                             }
                         } else if (storage.reply && channel) {
-                            console.log("BetterChatGestures: Slow tap - Creating reply to other's message");
                             ReplyManager?.createPendingReply({
                                 channel,
                                 message,
@@ -328,20 +306,7 @@ const BetterChatGestures: Plugin = {
                             });
                         }
 
-                        if ((isAuthor && (storage.userEdit || storage.reply)) || 
-                            (!isAuthor && storage.reply)) {
-                            if (storage.keyboardPopup) {
-                                try {
-                                    const keyboardModule = findByProps("openSystemKeyboard");
-                                    if (keyboardModule) {
-                                        console.log("BetterChatGestures: Opening keyboard (slow tap)");
-                                        keyboardModule.openSystemKeyboardForLastCreatedInput();
-                                    }
-                                } catch (error) {
-                                    logger.error("BetterChatGestures: Error opening keyboard", error);
-                                }
-                            }
-                        }
+                        this.openKeyboard();
 
                         this.doubleTapState({
                             state: "COMPLETE",
@@ -357,7 +322,6 @@ const BetterChatGestures: Plugin = {
 
             this.unpatchHandlers = () => {
                 try {
-                    console.log("BetterChatGestures: Unpatching", this.patches.length, "patches");
                     this.patches.forEach(unpatch => {
                         if (typeof unpatch === 'function') {
                             unpatch();
@@ -376,7 +340,6 @@ const BetterChatGestures: Plugin = {
 
     onLoad() {
         try {
-            // Check if required modules are available
             if (!MessagesHandlers) {
                 logger.error("BetterChatGestures: MessagesHandlers module not found! Plugin will not work.");
                 return;
@@ -394,20 +357,20 @@ const BetterChatGestures: Plugin = {
             
             storage.reply ??= true;
             storage.userEdit ??= true;
-            storage.keyboardPopup ??= false;
-            storage.delay ??= "1000"; // 1 second default for better UX
+            storage.keyboardPopup ??= true;
+            storage.delay ??= "1000";
+            storage.debugMode ??= false;
             
-            if (!storage.delay || storage.delay === "" || isNaN(parseInt(storage.delay, 10)) || parseInt(storage.delay, 10) <= 0) {
+            // Validate delay with minimum of 200ms
+            if (!storage.delay || storage.delay === "" || isNaN(parseInt(storage.delay, 10)) || parseInt(storage.delay, 10) < 200) {
                 storage.delay = "1000";
             }
             
             logger.log("BetterChatGestures: initialized with delay =", storage.delay);
-            logger.log("BetterChatGestures: userEdit =", storage.userEdit);
-            logger.log("BetterChatGestures: reply =", storage.reply);
             
             const self = this;
             
-            // NEW: Try multiple property names that might exist
+            // Try multiple property names
             const possiblePropertyNames = ["params", "handlers", "_params", "messageHandlers"];
             let origGetParams = null;
             let usedPropertyName = null;
@@ -452,7 +415,6 @@ const BetterChatGestures: Plugin = {
 
     onUnload() {
         try {
-            console.log("BetterChatGestures: Unloading plugin");
             this.resetTapState();
             
             if (this.unpatchGetter) this.unpatchGetter();

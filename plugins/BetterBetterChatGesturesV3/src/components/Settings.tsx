@@ -6,14 +6,11 @@ import { useProxy } from '@vendetta/storage';
 import Credits from "./Dependent/Credits";
 import SectionWrapper from "./Dependent/SectionWrapper";
 import { Icons, Miscellaneous, Constants } from "../common";
-import { findByProps } from '@vendetta/metro';
 import { semanticColors } from '@vendetta/ui';
 import { ReactNative } from '@vendetta/metro/common';
 
 const { FormRow, FormSwitch, FormDivider, FormInput, FormText } = Forms;
 const { ScrollView, View, Text } = General;
-
-const Router = findByProps('transitionToGuild', "openURL");
 
 const styles = stylesheet.createThemedStyleSheet({
 	icon: {
@@ -55,7 +52,7 @@ export default () => {
 	if (storage.reply === undefined) storage.reply = true;
 	if (storage.userEdit === undefined) storage.userEdit = true;
 	if (storage.keyboardPopup === undefined) storage.keyboardPopup = true;
-	if (storage.delay === undefined) storage.delay = "300";
+	if (storage.delay === undefined) storage.delay = "1000";
 	
 	useProxy(storage);
 	
@@ -66,6 +63,20 @@ export default () => {
 		// Only allow numeric input
 		if (/^\d*$/.test(value)) {
 			storage.delay = value;
+		}
+	};
+	
+	// Handle opening external URL
+	const openSourceURL = () => {
+		try {
+			if (ReactNative.Linking && ReactNative.Linking.openURL) {
+				ReactNative.Linking.openURL(Constants.plugin.source);
+			} else {
+				Miscellaneous.displayToast('Cannot open URL: Linking not available', 'error');
+			}
+		} catch (error) {
+			Miscellaneous.displayToast('Error opening URL', 'error');
+			console.error("Error opening URL:", error);
 		}
 	};
 	
@@ -134,7 +145,7 @@ export default () => {
                <FormInput
                   value={storage.delay}
                   onChange={handleDelayChange}
-                  placeholder={"300"}
+                  placeholder={"1000"}
                   title='Maximum Delay'
                   keyboardType="numeric"
                />
@@ -152,7 +163,7 @@ export default () => {
                   onLongPress={() => Miscellaneous.displayToast(`Opens the repository of ${manifest.name} on GitHub in an external page to view any source code of the plugin.`, 'tooltip')}
                   leading={<FormRow.Icon style={styles.icon} source={Icons.Open} />}
                   trailing={() => <FormRow.Arrow />}
-                  onPress={() => Router.openURL(Constants.plugin.source)}
+                  onPress={openSourceURL}
                />
             </View>
          </SectionWrapper>
