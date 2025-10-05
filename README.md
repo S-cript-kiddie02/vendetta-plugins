@@ -11,4 +11,4 @@ For it to work, you have to enable the "Double Tap to React" experiment by going
 
 If you don't want the first option, then change the tap delay to 1000s so that you can *tap - delay - tap*
 
-[BetterBetterChatGesturesV3](https://s-cript-kiddie02.github.io/vendetta-plugins/BetterBetterChatGestures)
+[BetterBetterChatGesturesV3](https://s-cript-kiddie02.github.io/vendetta-plugins/BetterBetterChatGesturesV3)
