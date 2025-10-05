@@ -2,6 +2,8 @@ import { build } from "esbuild";
 import { readdir, readFile, writeFile, mkdir, rm } from "fs/promises";
 import { join, resolve } from "path";
 import { fileURLToPath } from "url";
+import { readFile as rf } from 'fs/promises';
+import { marked } from 'marked';
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const PLUGINS_DIR = resolve(__dirname, "plugins");
@@ -129,41 +131,46 @@ async function main() {
   }
   
   // Générer index.html
+const readmeMd = await rf(join(__dirname, 'README.md'), 'utf-8')
+                 .catch(() => '');               // gracefull fallback
+const readmeHtml = readmeMd ? marked.parse(readmeMd) : '';
+
 const indexHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Vendetta Plugins</title>
-    <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            max-width: 800px;
-            margin: 50px auto;
-            padding: 20px;
-            background: #1a1a1a;
-            color: #e0e0e0;
-        }
-        .plugin { background: #2a2a2a; padding: 20px; margin: 10px 0; border-radius: 8px; }
-        h1 { color: #5865F2; }
-        a { color: #5865F2; }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vendetta Plugins</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;max-width:900px;margin:50px auto;padding:20px;background:#1a1a1a;color:#e0e0e0;line-height:1.6}
+    .plugin{background:#2a2a2a;padding:20px;margin:10px 0;border-radius:8px}
+    h1{color:#5865F2}
+    a{color:#5865F2}
+    .readme{border-left:4px solid #5865F2;padding-left:15px;margin:15px 0}
+    code{background:#111;padding:2px 4px;border-radius:4px}
+    pre{background:#111;padding:12px;border-radius:6px;overflow-x:auto}
+  </style>
 </head>
 <body>
-    <h1>Vendetta Plugins Repository</h1>
-    ${validPlugins.map(plugin => `
-        <div class="plugin">
-            <h2>${plugin}</h2>
-            <p>Install URL: <code>https://s-cript-kiddie02.github.io/vendetta-plugins/${plugin}</code></p>
-            <a href="./${plugin}/manifest.json">manifest.json</a> | 
-            <a href="./${plugin}/index.js">index.js</a>
-        </div>
-    `).join('')}
+  <h1>Vendetta Plugins Repository</h1>
+  ${validPlugins.map(plugin => `
+  <div class="plugin">
+    <h2>${plugin}</h2>
+    <p><strong>Install URL:</strong><br>
+      <code>https://s-cript-kiddie02.github.io/vendetta-plugins/${plugin}</code>
+    </p>
+    ${readmeHtml ? `<div class="readme">${readmeHtml}</div>` : ''}
+    <p>
+      <a href="./${plugin}/manifest.json">manifest.json</a> |
+      <a href="./${plugin}/index.js">index.js</a>
+    </p>
+  </div>
+  `).join('')}
 </body>
 </html>`;
 
-await writeFile(join(DIST_DIR, "index.html"), indexHtml);
-console.log("✅ Generated index.html");
+await writeFile(join(DIST_DIR, 'index.html'), indexHtml);
+console.log('✅ Generated index.html (README.md injected)');
 
   
   // Résumé
