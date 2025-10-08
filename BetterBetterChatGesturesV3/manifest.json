@@ -7,7 +7,7 @@
       "id": "Test2"
     }
   ],
-  "main": "src/index.tsx",
+  "main": "index.js",
   "vendetta": {
     "icon": "ic_chat"
   },
