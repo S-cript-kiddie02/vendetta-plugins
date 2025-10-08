@@ -64,8 +64,9 @@ async function buildPlugin(pluginName) {
   
   console.log(`   ✓ Generated hash: ${hash}`);
   
-  // Mettre à jour le hash dans le manifest
+  // Mettre à jour le hash et le champ "main" dans le manifest
   manifest.hash = hash;
+  manifest.main = "index.js"
   
   // Écrire le manifest avec le hash mis à jour
   const manifestOutput = JSON.stringify(manifest, null, 2);
@@ -74,7 +75,7 @@ async function buildPlugin(pluginName) {
     manifestOutput
   );
   
-  console.log(`   ✓ Wrote manifest.json with hash`);
+  console.log(`   ✓ Wrote manifest.json with hash with the correct main`);
   console.log(`✅ Successfully built ${pluginName}`);
   
   return true;
