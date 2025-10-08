@@ -1,5 +1,5 @@
 # BetterBetterChatGesturesV3
-A Fork of [BetterChatGestures](https://github.com/MYSTRAVIL/vendetta-plugins), supposed to work for Discord 295+.
+A fork of [BetterChatGestures](https://github.com/MYSTRAVIL/vendetta-plugins), supposed to work for Discord 295+.
 
 2 types of behaviours :
 
