@@ -38,7 +38,8 @@ async function buildPlugin(pluginName) {
       entryPoints: [entryPoint],
       outfile,
       bundle: true,
-      format: "esm",
+      format: "iife",
+      globalName: "plugin",
       external: [
         "@vendetta",
         "@vendetta*",
