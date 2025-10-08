@@ -385,6 +385,20 @@ const BetterChatGestures: Plugin = {
             }
             
             if (origGetParams && usedPropertyName) {
+                // NEW: Force patch immediately by creating a dummy instance
+                // This ensures the first double-tap is also intercepted
+                try {
+                    const dummyInstance = Object.create(MessagesHandlers.prototype);
+                    const handlers = origGetParams.call(dummyInstance);
+                    if (handlers) {
+                        self.patchHandlers.call(self, handlers);
+                        logger.log("BetterChatGestures: Proactively patched handlers on load");
+                    }
+                } catch (error) {
+                    logger.warn("BetterChatGestures: Could not proactively patch, will patch on first access", error);
+                }
+                
+                // Also patch on each access for future instances
                 Object.defineProperty(MessagesHandlers.prototype, usedPropertyName, {
                     configurable: true,
                     get() {
