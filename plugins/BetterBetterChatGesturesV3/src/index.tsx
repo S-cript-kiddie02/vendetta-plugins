@@ -94,46 +94,10 @@ const BetterChatGestures: Plugin = {
         }
     },
 
-    // Improved keyboard opening function with multiple fallbacks
     openKeyboard() {
-        if (!storage.keyboardPopup) return;
-        
-        try {
-            // Method 1: Try openSystemKeyboard module
-            const keyboardModule = findByProps("openSystemKeyboard");
-            
-            if (keyboardModule?.openSystemKeyboard) {
-                keyboardModule.openSystemKeyboard();
-                return;
-            }
-            
-            if (keyboardModule?.openSystemKeyboardForLastCreatedInput) {
-                keyboardModule.openSystemKeyboardForLastCreatedInput();
-                return;
-            }
-            
-            // Method 2: Try focusing the chat input directly
-            const ChatInput = ChatInputRef?.refs?.[0]?.current;
-            if (ChatInput?.focus) {
-                ChatInput.focus();
-                return;
-            }
-            
-            // Method 3: Try React Native Keyboard API
-            if (ReactNative.Keyboard?.dismiss) {
-                // Dismiss then re-open to force focus
-                setTimeout(() => {
-                    if (ChatInput?.focus) {
-                        ChatInput.focus();
-                    }
-                }, 50);
-            }
-        } catch (error) {
-            // Silently fail - keyboard opening is a nice-to-have feature
-            if (storage.debugMode) {
-                logger.error("BetterChatGestures: Error opening keyboard", error);
-            }
-        }
+        // Keyboard opening disabled due to instability
+        // The keyboard usually opens automatically anyway when editing/replying
+        return;
     },
 
     patchHandlers(handlers) {
@@ -357,7 +321,7 @@ const BetterChatGestures: Plugin = {
             
             storage.reply ??= true;
             storage.userEdit ??= true;
-            storage.keyboardPopup ??= true;
+            storage.keyboardPopup ??= false;
             storage.delay ??= "1000";
             storage.debugMode ??= false;
             
@@ -385,14 +349,21 @@ const BetterChatGestures: Plugin = {
             }
             
             if (origGetParams && usedPropertyName) {
-                // Patch the getter to intercept handler access
+                // Use a flag to ensure first access is patched
+                let isFirstAccess = true;
+                
                 Object.defineProperty(MessagesHandlers.prototype, usedPropertyName, {
                     configurable: true,
                     get() {
                         const handlers = origGetParams.call(this);
                         
-                        // Patch handlers on every access to ensure we catch all instances
-                        if (this && handlers) {
+                        // Patch handlers immediately on first real access
+                        if (this && isFirstAccess) {
+                            isFirstAccess = false;
+                            self.patchHandlers.call(self, handlers);
+                            logger.log("BetterChatGestures: Patched handlers on first access");
+                        } else if (this) {
+                            // Also patch for subsequent instances
                             self.patchHandlers.call(self, handlers);
                         }
                         
