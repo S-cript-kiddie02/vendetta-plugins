@@ -349,21 +349,15 @@ const BetterChatGestures: Plugin = {
             }
             
             if (origGetParams && usedPropertyName) {
-                // Use a flag to ensure first access is patched
-                let isFirstAccess = true;
-                
+                // Patch EVERY access to handlers - Discord may have multiple instances
                 Object.defineProperty(MessagesHandlers.prototype, usedPropertyName, {
                     configurable: true,
                     get() {
                         const handlers = origGetParams.call(this);
                         
-                        // Patch handlers immediately on first real access
-                        if (this && isFirstAccess) {
-                            isFirstAccess = false;
-                            self.patchHandlers.call(self, handlers);
-                            logger.log("BetterChatGestures: Patched handlers on first access");
-                        } else if (this) {
-                            // Also patch for subsequent instances
+                        // Patch every handler instance we encounter
+                        // The WeakSet in patchHandlers ensures we don't patch the same instance twice
+                        if (this && handlers) {
                             self.patchHandlers.call(self, handlers);
                         }
                         
