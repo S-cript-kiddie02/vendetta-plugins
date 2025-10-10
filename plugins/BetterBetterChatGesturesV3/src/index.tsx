@@ -95,7 +95,7 @@ const BetterChatGestures: Plugin = {
         }
     },
 
-    // Improved keyboard opening function with multiple fallbacks and better timing
+    // Improved keyboard opening function with multiple fallbacks
     openKeyboard() {
         if (!storage.keyboardPopup) return;
         
@@ -106,7 +106,7 @@ const BetterChatGestures: Plugin = {
             setTimeout(() => {
                 try {
                     // Method 1: Try openSystemKeyboard module (most reliable)
-                    const keyboardModule = findByProps("openSystemKeyboard");
+                    const keyboardModule = findByProps("openSystemKeyboard", "openSystemKeyboardForLastCreatedInput");
                     
                     if (keyboardModule?.openSystemKeyboard) {
                         if (storage.debugMode) {
@@ -124,78 +124,48 @@ const BetterChatGestures: Plugin = {
                         return;
                     }
                     
-                    // Method 2: Try to find and focus the chat input through various methods
+                    // Method 2: Try to find ChatInput through various methods
                     let chatInput = null;
                     
-                    // Try multiple ways to find the chat input
+                    // Try direct ref first
                     if (ChatInputRef?.refs?.[0]?.current) {
                         chatInput = ChatInputRef.refs[0].current;
                     }
                     
-                    // Alternative: try to find via React tree if direct ref fails
-                    if (!chatInput && window.vendetta?.metro?.cache) {
-                        const allModules = window.vendetta.metro.cache;
-                        for (const [key, module] of allModules) {
-                            try {
-                                if (module?.exports?.focus && module.exports?.props?.channel) {
-                                    chatInput = module.exports;
-                                    break;
-                                }
-                            } catch (e) {
-                                // Continue searching
-                            }
-                        }
-                    }
-                    
-                    if (chatInput?.focus) {
-                        if (storage.debugMode) {
-                            logger.log("BetterChatGestures: Opening keyboard via chatInput.focus");
-                        }
-                        chatInput.focus();
-                        return;
-                    }
-                    
-                    // Method 3: Try React Native Keyboard API with forced focus
-                    if (ReactNative.TextInput?.State) {
+                    // Try to find via module cache if direct ref fails
+                    if (!chatInput) {
                         try {
-                            // Get all text inputs and try to focus the first one
-                            const TextInputState = ReactNative.TextInput.State;
-                            if (TextInputState.focusTextInput) {
-                                // This is a more aggressive approach to focus any text input
-                                const textInputs = document.querySelectorAll('input, textarea');
-                                if (textInputs.length > 0) {
-                                    if (storage.debugMode) {
-                                        logger.log("BetterChatGestures: Found text inputs, attempting to focus");
-                                    }
-                                    // Focus the first text input found
-                                    setTimeout(() => {
-                                        textInputs[0].focus();
-                                    }, 50);
-                                    return;
-                                }
+                            const ChatInputModule = findByProps("focus", "blur");
+                            if (ChatInputModule && ChatInputModule.focus) {
+                                // Try to focus using the module's focus function
+                                ChatInputModule.focus();
+                                return;
                             }
-                        } catch (error) {
-                            // Fall through to next method
+                        } catch (e) {
+                            // Continue to next method
                         }
                     }
                     
-                    // Method 4: Try using the insertText function which might trigger keyboard
+                    // Method 3: Try using insertText to trigger keyboard
                     if (ChatInputRef?.insertText) {
                         if (storage.debugMode) {
                             logger.log("BetterChatGestures: Attempting to trigger keyboard via insertText");
                         }
                         // Insert empty string to potentially trigger keyboard
                         ChatInputRef.insertText("");
-                        
-                        // Try again on next attempt
-                        if (attempt < 2) {
-                            attemptOpenKeyboard(attempt + 1);
+                    }
+                    
+                    // Method 4: Try React Native's focus system
+                    if (ReactNative.findNodeHandle && chatInput) {
+                        try {
+                            ReactNative.findNodeHandle(chatInput)?.focus();
+                        } catch (e) {
+                            // Ignore focus errors
                         }
-                        return;
                     }
                     
                     // If nothing worked, try again on next attempt
-                    if (attempt < 3) {
+                    if (attempt < 2) {
                         attemptOpenKeyboard(attempt + 1);
                     } else if (storage.debugMode) {
                         logger.log("BetterChatGestures: All keyboard opening methods failed");
@@ -252,7 +222,8 @@ const BetterChatGestures: Plugin = {
                                 MessageID,
                                 message.content || ''
                             );
-                            this.openKeyboard();
+                            // Delay keyboard opening to ensure edit mode is active
+                            setTimeout(() => this.openKeyboard(), 100);
                             return; // Block original function
                         } else if (storage.reply && channel) {
                             ReplyManager?.createPendingReply({
@@ -260,7 +231,8 @@ const BetterChatGestures: Plugin = {
                                 message,
                                 shouldMention: true
                             });
-                            this.openKeyboard();
+                            // Delay keyboard opening to ensure reply mode is active
+                            setTimeout(() => this.openKeyboard(), 100);
                             return; // Block original function
                         }
                         
@@ -302,7 +274,7 @@ const BetterChatGestures: Plugin = {
                         ChatInputRef.insertText(`@${message.author.username}${discriminatorText}`);
                         
                         // Open keyboard after mentioning
-                        this.openKeyboard();
+                        setTimeout(() => this.openKeyboard(), 100);
                     } catch (error) {
                         logger.error("BetterChatGestures: Error in handleTapUsername patch", error);
                         return orig.apply(handlers, args);
@@ -384,14 +356,14 @@ const BetterChatGestures: Plugin = {
                                     currentMessageID,
                                     enrichedNativeEvent.content
                                 );
-                                this.openKeyboard();
+                                setTimeout(() => this.openKeyboard(), 100);
                             } else if (storage.reply && channel) {
                                 ReplyManager?.createPendingReply({
                                     channel,
                                     message,
                                     shouldMention: true
                                 });
-                                this.openKeyboard();
+                                setTimeout(() => this.openKeyboard(), 100);
                             }
                         } else if (storage.reply && channel) {
                             ReplyManager?.createPendingReply({
@@ -399,7 +371,7 @@ const BetterChatGestures: Plugin = {
                                 message,
                                 shouldMention: true
                             });
-                            this.openKeyboard();
+                            setTimeout(() => this.openKeyboard(), 100);
                         }
 
                         this.doubleTapState({
@@ -491,10 +463,10 @@ const BetterChatGestures: Plugin = {
                     }
                 });
                 
-                // NEW: Force immediate instance patching with multiple attempts
+                // NEW: Improved instance patching without trying to create new instance
                 const forcePatchInstance = () => {
                     try {
-                        // Method 1: Search for existing instances in React fiber cache
+                        // Search for existing instances in React fiber cache
                         const allModules = window.vendetta?.metro?.cache || new Map();
                         let foundInstance = false;
                         
@@ -503,38 +475,19 @@ const BetterChatGestures: Plugin = {
                                 if (module?.exports && typeof module.exports === 'object') {
                                     for (const exportKey in module.exports) {
                                         const exported = module.exports[exportKey];
-                                        if (exported && 
-                                            (exported.prototype === MessagesHandlers.prototype ||
-                                             exported instanceof MessagesHandlers)) {
-                                            // Try to access the getter via this instance
-                                            const handlers = exported[usedPropertyName];
-                                            if (handlers) {
-                                                self.patchHandlers.call(self, handlers);
-                                                logger.log("BetterChatGestures: Found and patched existing instance during load!");
+                                        // Look for objects that have the handlers we want to patch
+                                        if (exported && typeof exported === 'object') {
+                                            // Check if this object has any of the handler methods
+                                            if (exported.handleDoubleTapMessage || exported.handleTapMessage || exported.handleTapUsername) {
+                                                self.patchHandlers.call(self, exported);
+                                                logger.log("BetterChatGestures: Found and patched handler instance");
                                                 foundInstance = true;
-                                                return true;
                                             }
                                         }
                                     }
                                 }
                             } catch (e) {
                                 // Ignore search errors
-                            }
-                        }
-                        
-                        // Method 2: Try to create a new instance if no existing one found
-                        if (!foundInstance) {
-                            try {
-                                const newInstance = new MessagesHandlers();
-                                const handlers = newInstance[usedPropertyName];
-                                if (handlers) {
-                                    self.patchHandlers.call(self, handlers);
-                                    logger.log("BetterChatGestures: Created and patched new instance!");
-                                    foundInstance = true;
-                                    return true;
-                                }
-                            } catch (createError) {
-                                logger.warn("BetterChatGestures: Could not create new instance", createError);
                             }
                         }
                         
@@ -554,7 +507,7 @@ const BetterChatGestures: Plugin = {
                     setTimeout(() => {
                         logger.log("BetterChatGestures: Retrying instance patching after delay");
                         forcePatchInstance();
-                    }, 500);
+                    }, 1000);
                 }
                 
                 this.unpatchGetter = () => {
