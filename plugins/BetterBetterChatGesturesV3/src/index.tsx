@@ -453,7 +453,7 @@ const BetterChatGestures: Plugin = {
             storage.userEdit ??= true;
             storage.keyboardPopup ??= true;
             storage.delay ??= "1000";
-            storage.debugMode ??= false;
+            storage.debugMode ??= true;
             
             // Initialize the first tap handling flag
             this.isFirstDoubleTapHandled = false;
