@@ -49,6 +49,7 @@ const BetterChatGestures: Plugin = {
     timeoutTap: null,
     patches: [],
     handlersInstances: new WeakSet(),
+    firstAccessDone: false,
 
     doubleTapState({ state = "UNKNOWN", nativeEvent }: DoubleTapStateProps) {
         try {
@@ -385,28 +386,19 @@ const BetterChatGestures: Plugin = {
             }
             
             if (origGetParams && usedPropertyName) {
-                // ÉTAPE 1 : Patcher proactivement en créant une instance et en forçant l'accès au getter
-                try {
-                    // Créer une instance factice pour forcer l'accès aux handlers
-                    const tempInstance = Object.create(MessagesHandlers.prototype);
-                    
-                    // Appeler le getter original pour obtenir les handlers
-                    const initialHandlers = origGetParams.call(tempInstance);
-                    
-                    // Patcher immédiatement ces handlers
-                    if (initialHandlers) {
-                        self.patchHandlers.call(self, initialHandlers);
-                        logger.log("BetterChatGestures: Proactively patched handlers on load");
-                    }
-                } catch (error) {
-                    logger.warn("BetterChatGestures: Could not proactively patch, will patch on first access", error);
-                }
-                
-                // ÉTAPE 2 : Aussi intercepter le getter pour patcher les futures instances
+                // Solution : intercepter dès le premier accès avec un flag
                 Object.defineProperty(MessagesHandlers.prototype, usedPropertyName, {
                     configurable: true,
                     get() {
-                        if (this) self.patchHandlers.call(self, this);
+                        // Patcher immédiatement sur le premier accès
+                        if (this && !self.firstAccessDone) {
+                            self.firstAccessDone = true;
+                            self.patchHandlers.call(self, this);
+                            logger.log("BetterChatGestures: Patched on first access");
+                        } else if (this && self.firstAccessDone) {
+                            // Pour les accès suivants, juste vérifier si besoin de patcher
+                            self.patchHandlers.call(self, this);
+                        }
                         return origGetParams.call(this);
                     }
                 });
@@ -442,6 +434,8 @@ const BetterChatGestures: Plugin = {
                 clearTimeout(this.timeoutTap);
                 this.timeoutTap = null;
             }
+            
+            this.firstAccessDone = false;
         } catch (error) {
             logger.error("BetterChatGestures: Error in onUnload", error);
         }
