@@ -385,11 +385,27 @@ const BetterChatGestures: Plugin = {
             }
             
             if (origGetParams && usedPropertyName) {
-                // CORRECTION CRITIQUE : passer 'this' directement, pas le résultat de origGetParams
+                // ÉTAPE 1 : Patcher proactivement en créant une instance et en forçant l'accès au getter
+                try {
+                    // Créer une instance factice pour forcer l'accès aux handlers
+                    const tempInstance = Object.create(MessagesHandlers.prototype);
+                    
+                    // Appeler le getter original pour obtenir les handlers
+                    const initialHandlers = origGetParams.call(tempInstance);
+                    
+                    // Patcher immédiatement ces handlers
+                    if (initialHandlers) {
+                        self.patchHandlers.call(self, initialHandlers);
+                        logger.log("BetterChatGestures: Proactively patched handlers on load");
+                    }
+                } catch (error) {
+                    logger.warn("BetterChatGestures: Could not proactively patch, will patch on first access", error);
+                }
+                
+                // ÉTAPE 2 : Aussi intercepter le getter pour patcher les futures instances
                 Object.defineProperty(MessagesHandlers.prototype, usedPropertyName, {
                     configurable: true,
                     get() {
-                        // 'this' dans ce contexte EST déjà l'objet handlers
                         if (this) self.patchHandlers.call(self, this);
                         return origGetParams.call(this);
                     }
