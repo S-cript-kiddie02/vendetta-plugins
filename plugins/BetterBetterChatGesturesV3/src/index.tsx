@@ -165,7 +165,7 @@ const BetterChatGestures: Plugin = {
                         const currentUser = UserStore?.getCurrentUser();
                         const isAuthor = currentUser && message.author ? message.author.id === currentUser.id : false;
                         
-                        // Execute custom logic
+                        // Execute custom logic - BLOCK the original function when we handle the action
                         if (isAuthor && storage.userEdit) {
                             Messages?.startEditMessage(
                                 ChannelID,
@@ -173,7 +173,7 @@ const BetterChatGestures: Plugin = {
                                 message.content || ''
                             );
                             this.openKeyboard();
-                            return; // Block the original function
+                            return; // Block original function
                         } else if (storage.reply && channel) {
                             ReplyManager?.createPendingReply({
                                 channel,
@@ -181,7 +181,7 @@ const BetterChatGestures: Plugin = {
                                 shouldMention: true
                             });
                             this.openKeyboard();
-                            return; // Block the original function
+                            return; // Block original function
                         }
                         
                         // If no custom action was taken, allow the original function
@@ -398,7 +398,7 @@ const BetterChatGestures: Plugin = {
             }
             
             if (origGetParams && usedPropertyName) {
-                // Intercepter le getter
+                // Intercept the getter
                 Object.defineProperty(MessagesHandlers.prototype, usedPropertyName, {
                     configurable: true,
                     get() {
@@ -407,42 +407,70 @@ const BetterChatGestures: Plugin = {
                     }
                 });
                 
-                // Forcer immédiatement l'accès au getter en trouvant une instance existante
-                try {
-                    // Chercher dans le cache React fiber pour trouver une instance existante
-                    const allModules = window.vendetta?.metro?.cache || new Map();
-                    let foundInstance = false;
-                    
-                    for (const [key, module] of allModules) {
-                        try {
-                            // Chercher des instances de MessagesHandlers dans les modules
-                            if (module?.exports && typeof module.exports === 'object') {
-                                for (const exportKey in module.exports) {
-                                    const exported = module.exports[exportKey];
-                                    if (exported?.prototype === MessagesHandlers.prototype ||
-                                        exported instanceof MessagesHandlers) {
-                                        // Essayer d'accéder au getter via cette instance
-                                        const handlers = exported[usedPropertyName];
-                                        if (handlers) {
-                                            self.patchHandlers.call(self, handlers);
-                                            logger.log("BetterChatGestures: Found and patched existing instance during load!");
-                                            foundInstance = true;
-                                            break;
+                // NEW: Force immediate instance patching with multiple attempts
+                const forcePatchInstance = () => {
+                    try {
+                        // Method 1: Search for existing instances in React fiber cache
+                        const allModules = window.vendetta?.metro?.cache || new Map();
+                        let foundInstance = false;
+                        
+                        for (const [key, module] of allModules) {
+                            try {
+                                if (module?.exports && typeof module.exports === 'object') {
+                                    for (const exportKey in module.exports) {
+                                        const exported = module.exports[exportKey];
+                                        if (exported && 
+                                            (exported.prototype === MessagesHandlers.prototype ||
+                                             exported instanceof MessagesHandlers)) {
+                                            // Try to access the getter via this instance
+                                            const handlers = exported[usedPropertyName];
+                                            if (handlers) {
+                                                self.patchHandlers.call(self, handlers);
+                                                logger.log("BetterChatGestures: Found and patched existing instance during load!");
+                                                foundInstance = true;
+                                                return true;
+                                            }
                                         }
                                     }
                                 }
+                            } catch (e) {
+                                // Ignore search errors
                             }
-                            if (foundInstance) break;
-                        } catch (e) {
-                            // Ignorer les erreurs de recherche
                         }
+                        
+                        // Method 2: Try to create a new instance if no existing one found
+                        if (!foundInstance) {
+                            try {
+                                const newInstance = new MessagesHandlers();
+                                const handlers = newInstance[usedPropertyName];
+                                if (handlers) {
+                                    self.patchHandlers.call(self, handlers);
+                                    logger.log("BetterChatGestures: Created and patched new instance!");
+                                    foundInstance = true;
+                                    return true;
+                                }
+                            } catch (createError) {
+                                logger.warn("BetterChatGestures: Could not create new instance", createError);
+                            }
+                        }
+                        
+                        if (!foundInstance) {
+                            logger.log("BetterChatGestures: No instance found, will patch on first access");
+                        }
+                        return foundInstance;
+                    } catch (error) {
+                        logger.warn("BetterChatGestures: Could not force patch instance", error);
+                        return false;
                     }
-                    
-                    if (!foundInstance) {
-                        logger.log("BetterChatGestures: No existing instance found, will patch on first access");
-                    }
-                } catch (error) {
-                    logger.warn("BetterChatGestures: Could not search for existing instance", error);
+                };
+
+                // Try to patch immediately, then retry after a short delay
+                let patched = forcePatchInstance();
+                if (!patched) {
+                    setTimeout(() => {
+                        logger.log("BetterChatGestures: Retrying instance patching after delay");
+                        forcePatchInstance();
+                    }, 500);
                 }
                 
                 this.unpatchGetter = () => {
