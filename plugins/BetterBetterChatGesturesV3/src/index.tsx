@@ -95,46 +95,126 @@ const BetterChatGestures: Plugin = {
         }
     },
 
-    // Improved keyboard opening function with multiple fallbacks
+    // Improved keyboard opening function with multiple fallbacks and better timing
     openKeyboard() {
         if (!storage.keyboardPopup) return;
         
-        try {
-            // Method 1: Try openSystemKeyboard module
-            const keyboardModule = findByProps("openSystemKeyboard");
+        // Use multiple attempts with different delays to ensure keyboard opens
+        const attemptOpenKeyboard = (attempt = 0) => {
+            if (attempt > 3) return; // Max 3 attempts
             
-            if (keyboardModule?.openSystemKeyboard) {
-                keyboardModule.openSystemKeyboard();
-                return;
-            }
-            
-            if (keyboardModule?.openSystemKeyboardForLastCreatedInput) {
-                keyboardModule.openSystemKeyboardForLastCreatedInput();
-                return;
-            }
-            
-            // Method 2: Try focusing the chat input directly
-            const ChatInput = ChatInputRef?.refs?.[0]?.current;
-            if (ChatInput?.focus) {
-                ChatInput.focus();
-                return;
-            }
-            
-            // Method 3: Try React Native Keyboard API
-            if (ReactNative.Keyboard?.dismiss) {
-                // Dismiss then re-open to force focus
-                setTimeout(() => {
-                    if (ChatInput?.focus) {
-                        ChatInput.focus();
+            setTimeout(() => {
+                try {
+                    // Method 1: Try openSystemKeyboard module (most reliable)
+                    const keyboardModule = findByProps("openSystemKeyboard");
+                    
+                    if (keyboardModule?.openSystemKeyboard) {
+                        if (storage.debugMode) {
+                            logger.log("BetterChatGestures: Opening keyboard via openSystemKeyboard");
+                        }
+                        keyboardModule.openSystemKeyboard();
+                        return;
                     }
-                }, 50);
-            }
-        } catch (error) {
-            // Silently fail - keyboard opening is a nice-to-have feature
-            if (storage.debugMode) {
-                logger.error("BetterChatGestures: Error opening keyboard", error);
-            }
-        }
+                    
+                    if (keyboardModule?.openSystemKeyboardForLastCreatedInput) {
+                        if (storage.debugMode) {
+                            logger.log("BetterChatGestures: Opening keyboard via openSystemKeyboardForLastCreatedInput");
+                        }
+                        keyboardModule.openSystemKeyboardForLastCreatedInput();
+                        return;
+                    }
+                    
+                    // Method 2: Try to find and focus the chat input through various methods
+                    let chatInput = null;
+                    
+                    // Try multiple ways to find the chat input
+                    if (ChatInputRef?.refs?.[0]?.current) {
+                        chatInput = ChatInputRef.refs[0].current;
+                    }
+                    
+                    // Alternative: try to find via React tree if direct ref fails
+                    if (!chatInput && window.vendetta?.metro?.cache) {
+                        const allModules = window.vendetta.metro.cache;
+                        for (const [key, module] of allModules) {
+                            try {
+                                if (module?.exports?.focus && module.exports?.props?.channel) {
+                                    chatInput = module.exports;
+                                    break;
+                                }
+                            } catch (e) {
+                                // Continue searching
+                            }
+                        }
+                    }
+                    
+                    if (chatInput?.focus) {
+                        if (storage.debugMode) {
+                            logger.log("BetterChatGestures: Opening keyboard via chatInput.focus");
+                        }
+                        chatInput.focus();
+                        return;
+                    }
+                    
+                    // Method 3: Try React Native Keyboard API with forced focus
+                    if (ReactNative.TextInput?.State) {
+                        try {
+                            // Get all text inputs and try to focus the first one
+                            const TextInputState = ReactNative.TextInput.State;
+                            if (TextInputState.focusTextInput) {
+                                // This is a more aggressive approach to focus any text input
+                                const textInputs = document.querySelectorAll('input, textarea');
+                                if (textInputs.length > 0) {
+                                    if (storage.debugMode) {
+                                        logger.log("BetterChatGestures: Found text inputs, attempting to focus");
+                                    }
+                                    // Focus the first text input found
+                                    setTimeout(() => {
+                                        textInputs[0].focus();
+                                    }, 50);
+                                    return;
+                                }
+                            }
+                        } catch (error) {
+                            // Fall through to next method
+                        }
+                    }
+                    
+                    // Method 4: Try using the insertText function which might trigger keyboard
+                    if (ChatInputRef?.insertText) {
+                        if (storage.debugMode) {
+                            logger.log("BetterChatGestures: Attempting to trigger keyboard via insertText");
+                        }
+                        // Insert empty string to potentially trigger keyboard
+                        ChatInputRef.insertText("");
+                        
+                        // Try again on next attempt
+                        if (attempt < 2) {
+                            attemptOpenKeyboard(attempt + 1);
+                        }
+                        return;
+                    }
+                    
+                    // If nothing worked, try again on next attempt
+                    if (attempt < 3) {
+                        attemptOpenKeyboard(attempt + 1);
+                    } else if (storage.debugMode) {
+                        logger.log("BetterChatGestures: All keyboard opening methods failed");
+                    }
+                    
+                } catch (error) {
+                    if (storage.debugMode) {
+                        logger.error("BetterChatGestures: Error opening keyboard attempt " + attempt, error);
+                    }
+                    // Try again on next attempt if not the last one
+                    if (attempt < 3) {
+                        attemptOpenKeyboard(attempt + 1);
+                    }
+                }
+            }, attempt * 100 + 50); // Stagger attempts: 50ms, 150ms, 250ms
+        };
+        
+        // Start the keyboard opening process
+        attemptOpenKeyboard(0);
     },
 
     patchHandlers(handlers) {
@@ -220,6 +300,9 @@ const BetterChatGestures: Plugin = {
                             ? `#${message.author.discriminator}` 
                             : '';
                         ChatInputRef.insertText(`@${message.author.username}${discriminatorText}`);
+                        
+                        // Open keyboard after mentioning
+                        this.openKeyboard();
                     } catch (error) {
                         logger.error("BetterChatGestures: Error in handleTapUsername patch", error);
                         return orig.apply(handlers, args);
@@ -301,12 +384,14 @@ const BetterChatGestures: Plugin = {
                                     currentMessageID,
                                     enrichedNativeEvent.content
                                 );
+                                this.openKeyboard();
                             } else if (storage.reply && channel) {
                                 ReplyManager?.createPendingReply({
                                     channel,
                                     message,
                                     shouldMention: true
                                 });
+                                this.openKeyboard();
                             }
                         } else if (storage.reply && channel) {
                             ReplyManager?.createPendingReply({
@@ -314,9 +399,8 @@ const BetterChatGestures: Plugin = {
                                 message,
                                 shouldMention: true
                             });
+                            this.openKeyboard();
                         }
-
-                        this.openKeyboard();
 
                         this.doubleTapState({
                             state: "COMPLETE",
