@@ -1,12 +1,14 @@
-import { patcher } from "vendetta";
-import { findByProps, findByName } from "vendetta/metro";
-import { fluxDispatcher } from "vendetta/metro/common";
-import { ReactNative, React } from "vendetta/metro/common";
+// === IMPORTATIONS CORRIGÉES ET MODERNISÉES ===
+import { patcher } from "@vendetta/patcher";
+import { findByProps, findByName } from "@vendetta/metro";
+import { FluxDispatcher, React, ReactNative } from "@vendetta/metro/common"; // Note: FluxDispatcher avec une majuscule
+import { logger } from "@vendetta/logger";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
-import { logger } from "@vendetta"; // On importe le logger pour le diagnostic
+
+// Le reste du code est quasi identique, mais utilise les modules importés correctement
 
 const Messages = findByProps("startEditMessage");
-const UserStore = findByProps("getCurrentUser");
+const UserStore = findbyProps("getCurrentUser");
 
 let justHandledDoubleTap = false;
 
@@ -17,7 +19,7 @@ export default {
         // === 1. PATCH DU GESTE SUR LES MESSAGES (Partie principale) ===
         try {
             const chatMessagePatch = patcher.after("render", findByName("ChatMessage", false), ([{ message, channel }], res) => {
-                if (!message || !channel) return res; // Sécurité supplémentaire
+                if (!message || !channel) return res;
 
                 const doubleTapGesture = Gesture.Tap()
                     .numberOfTaps(2)
@@ -30,7 +32,8 @@ export default {
                             if (message.author.id === UserStore.getCurrentUser().id) {
                                 Messages.startEditMessage(channel.id, message.id, message.content);
                             } else {
-                                fluxDispatcher.dispatch({
+                                // On utilise FluxDispatcher avec une majuscule
+                                FluxDispatcher.dispatch({
                                     type: "MESSAGE_START_REPLY",
                                     channel,
                                     message,
@@ -51,7 +54,7 @@ export default {
 
         } catch (e) {
             logger.error("BetterBetterChatGesturesV3: FAILED to patch ChatMessage component.", e);
-            return; // On arrête tout si la fonctionnalité principale ne peut pas être patchée
+            return;
         }
 
 
@@ -59,18 +62,16 @@ export default {
         try {
             const ReactionModule = findByProps("addReaction", "removeReaction");
 
-            // On vérifie si on a bien trouvé le module AVANT de le patcher
             if (ReactionModule) {
                 const reactionPatch = patcher.before("addReaction", ReactionModule, () => {
                     if (justHandledDoubleTap) {
                         justHandledDoubleTap = false;
-                        return false; // Annule l'ajout de la réaction
+                        return false;
                     }
                 });
                 this.reactionUnpatch = reactionPatch;
                 logger.log("BetterBetterChatGesturesV3: ReactionModule patched successfully. Anti-reaction fix is active.");
             } else {
-                // Si on ne trouve pas le module, on affiche un avertissement et on continue
                 logger.warn("BetterBetterChatGesturesV3: Could not find ReactionModule. The anti-reaction fix is disabled. First double-tap may still trigger a reaction.");
             }
 
