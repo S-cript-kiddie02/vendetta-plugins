@@ -49,7 +49,6 @@ const BetterChatGestures: Plugin = {
     timeoutTap: null,
     patches: [],
     handlersInstances: new WeakSet(),
-    firstAccessDone: false,
 
     doubleTapState({ state = "UNKNOWN", nativeEvent }: DoubleTapStateProps) {
         try {
@@ -386,22 +385,52 @@ const BetterChatGestures: Plugin = {
             }
             
             if (origGetParams && usedPropertyName) {
-                // Solution : intercepter dès le premier accès avec un flag
+                // Intercepter le getter
                 Object.defineProperty(MessagesHandlers.prototype, usedPropertyName, {
                     configurable: true,
                     get() {
-                        // Patcher immédiatement sur le premier accès
-                        if (this && !self.firstAccessDone) {
-                            self.firstAccessDone = true;
-                            self.patchHandlers.call(self, this);
-                            logger.log("BetterChatGestures: Patched on first access");
-                        } else if (this && self.firstAccessDone) {
-                            // Pour les accès suivants, juste vérifier si besoin de patcher
-                            self.patchHandlers.call(self, this);
-                        }
+                        if (this) self.patchHandlers.call(self, this);
                         return origGetParams.call(this);
                     }
                 });
+                
+                // NOUVEAU: Forcer immédiatement l'accès au getter en trouvant une instance existante
+                try {
+                    // Chercher dans le cache React fiber pour trouver une instance existante
+                    const allModules = window.vendetta?.metro?.cache || new Map();
+                    let foundInstance = false;
+                    
+                    for (const [key, module] of allModules) {
+                        try {
+                            // Chercher des instances de MessagesHandlers dans les modules
+                            if (module?.exports && typeof module.exports === 'object') {
+                                for (const exportKey in module.exports) {
+                                    const exported = module.exports[exportKey];
+                                    if (exported?.prototype === MessagesHandlers.prototype ||
+                                        exported instanceof MessagesHandlers) {
+                                        // Essayer d'accéder au getter via cette instance
+                                        const handlers = exported[usedPropertyName];
+                                        if (handlers) {
+                                            self.patchHandlers.call(self, handlers);
+                                            logger.log("BetterChatGestures: Found and patched existing instance during load!");
+                                            foundInstance = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if (foundInstance) break;
+                        } catch (e) {
+                            // Ignorer les erreurs de recherche
+                        }
+                    }
+                    
+                    if (!foundInstance) {
+                        logger.log("BetterChatGestures: No existing instance found, will patch on first access");
+                    }
+                } catch (error) {
+                    logger.warn("BetterChatGestures: Could not search for existing instance", error);
+                }
                 
                 this.unpatchGetter = () => {
                     try {
@@ -434,8 +463,6 @@ const BetterChatGestures: Plugin = {
                 clearTimeout(this.timeoutTap);
                 this.timeoutTap = null;
             }
-            
-            this.firstAccessDone = false;
         } catch (error) {
             logger.error("BetterChatGestures: Error in onUnload", error);
         }
