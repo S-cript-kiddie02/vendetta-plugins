@@ -1,6 +1,6 @@
 import { findByProps, findByStoreName } from "@vendetta/metro";
 import { ReactNative } from "@vendetta/metro/common";
-import { instead, after } from "@vendetta/patcher";
+import { instead } from "@vendetta/patcher";
 import { storage, manifest } from "@vendetta/plugin";
 import Settings from "./components/Settings";
 import { logger } from "@vendetta";
@@ -11,14 +11,13 @@ const MessageStore = findByStoreName("MessageStore");
 const UserStore = findByStoreName("UserStore");
 const Messages = findByProps("sendMessage", "startEditMessage");
 const ReplyManager = findByProps("createPendingReply");
-// Pour ouvrir le clavier (méthode simple)
 const ChatInputRef = findByProps("insertText");
 
-// --- RECHERCHE DU MODULE HANDLERS ---
+// --- RECHERCHE DU MODULE ---
 let MessagesHandlersModule = findByProps("MessagesHandlers");
 
+// Fallback recherche
 if (!MessagesHandlersModule) {
-    logger.warn("DEBUG: MessagesHandlers introuvable via props, tentative via cache...");
     const allModules = window.vendetta?.metro?.cache || new Map();
     for (const [key, module] of allModules) {
         if (module?.exports?.MessagesHandlers) {
@@ -30,134 +29,136 @@ if (!MessagesHandlersModule) {
 
 const MessagesHandlers = MessagesHandlersModule?.MessagesHandlers;
 
-// --- HELPER ---
-function openKeyboard() {
-    try {
-        const ChatInput = ChatInputRef?.refs?.[0]?.current;
-        if (ChatInput?.focus) ChatInput.focus();
-    } catch (e) { console.log(e) }
-}
+// --- STATE LOCAL POUR LE DOUBLE TAP MANUEL ---
+let lastTapTime = 0;
+let lastTapMessageId = null;
+const DOUBLE_TAP_DELAY = 400; // ms
 
 const BetterChatGestures = {
     patches: [],
-    handlersPatched: new WeakSet(), // Pour éviter de patcher 2 fois la même instance
+    handlersPatched: new WeakSet(),
+
+    openKeyboard() {
+        try {
+            const ChatInput = ChatInputRef?.refs?.[0]?.current;
+            if (ChatInput?.focus) ChatInput.focus();
+        } catch (e) {}
+    },
 
     // Cette fonction applique le patch sur une instance spécifique de handlers
-    applyPatchToInstance(instance, origin) {
+    applyPatchToInstance(instance) {
         if (this.handlersPatched.has(instance)) return;
         this.handlersPatched.add(instance);
         
-        logger.log(`DEBUG: Patching instance venant de ${origin}`);
-
-        // 1. Patch du DOUBLE TAP
-        if (instance.handleDoubleTapMessage) {
-            const patch = instead("handleDoubleTapMessage", instance, (args, orig) => {
-                logger.log("DEBUG: handleDoubleTapMessage DÉCLENCHÉ !");
-                
+        // ON PATCHE UNIQUEMENT handleTapMessage
+        // C'est la seule fonction dont on est sûr de l'existence
+        if (instance.handleTapMessage) {
+            const patch = instead("handleTapMessage", instance, (args, orig) => {
                 try {
                     const event = args[0];
-                    // Vérification basique
-                    if (!event || !event.nativeEvent) {
-                        logger.log("DEBUG: Pas de nativeEvent, on bloque.");
-                        return true; 
+                    if (!event || !event.nativeEvent) return orig.apply(instance, args);
+
+                    const { messageId, channelId } = event.nativeEvent;
+                    const now = Date.now();
+
+                    // --- LOGIQUE DE DÉTECTION DOUBLE TAP ---
+                    const isSameMessage = messageId === lastTapMessageId;
+                    const isFastEnough = (now - lastTapTime) < DOUBLE_TAP_DELAY;
+
+                    if (isSameMessage && isFastEnough) {
+                        // C'EST UN DOUBLE TAP !
+                        logger.log("BetterChatGestures: Double Tap Manous detecté !");
+                        
+                        // Reset pour éviter un triple tap
+                        lastTapTime = 0;
+                        lastTapMessageId = null;
+
+                        // Récupération des données
+                        const message = MessageStore.getMessage(channelId, messageId);
+                        const channel = ChannelStore.getChannel(channelId);
+                        const currentUser = UserStore.getCurrentUser();
+
+                        if (!message || !currentUser) return; // Si erreur, on ne fait rien
+
+                        const isAuthor = message.author.id === currentUser.id;
+
+                        // Action
+                        if (isAuthor && storage.userEdit) {
+                            Messages.startEditMessage(channelId, messageId, message.content || "");
+                        } else if (storage.reply) {
+                            ReplyManager.createPendingReply({ channel, message, shouldMention: true });
+                        }
+
+                        this.openKeyboard();
+                        
+                        // CRITIQUE : On retourne true (ou rien) sans appeler orig()
+                        // Cela empêche Discord de traiter ce 2ème clic
+                        // Donc pas de zoom, pas de réaction, rien.
+                        return true;
                     }
 
-                    const { channelId, messageId } = event.nativeEvent;
-                    logger.log(`DEBUG: DoubleTap détecté sur MsgID: ${messageId}`);
+                    // C'est un premier tap (ou trop lent)
+                    lastTapTime = now;
+                    lastTapMessageId = messageId;
 
-                    const message = MessageStore.getMessage(channelId, messageId);
-                    const channel = ChannelStore.getChannel(channelId);
-                    const currentUser = UserStore.getCurrentUser();
-
-                    if (!message || !currentUser) {
-                         logger.log("DEBUG: Message ou User introuvable");
-                         return true;
-                    }
-
-                    const isAuthor = message.author.id === currentUser.id;
-                    logger.log(`DEBUG: Auteur ? ${isAuthor} | Action: ${isAuthor ? "Edit" : "Reply"}`);
-
-                    // ACTION
-                    if (isAuthor && storage.userEdit) {
-                        Messages.startEditMessage(channelId, messageId, message.content || "");
-                    } else if (storage.reply) {
-                        ReplyManager.createPendingReply({ channel, message, shouldMention: true });
-                    }
-
-                    openKeyboard();
-                    
-                    logger.log("DEBUG: Action terminée, return true pour bloquer Discord.");
-                    return true; // BLOQUE LA RÉACTION
+                    // On laisse le clic normal se faire (pour ouvrir clavier, etc.)
+                    return orig.apply(instance, args);
 
                 } catch (e) {
-                    logger.error("DEBUG: Crash dans le patch", e);
-                    return true; // En cas d'erreur, on bloque quand même
+                    logger.error("BetterChatGestures: Error in handleTapMessage", e);
+                    return orig.apply(instance, args);
                 }
             });
             this.patches.push(patch);
+            logger.log("BetterChatGestures: Patch appliqué sur handleTapMessage");
         } else {
-            logger.warn("DEBUG: L'instance ne possède pas handleDoubleTapMessage !");
+            logger.error("BetterChatGestures: handleTapMessage introuvable sur l'instance !");
         }
     },
 
     onLoad() {
-        logger.log("DEBUG: Plugin Loaded");
-
         if (!MessagesHandlers) {
-            logger.error("DEBUG: FATAL - MessagesHandlers class introuvable.");
+            logger.error("BetterChatGestures: MessagesHandlers class not found.");
             return;
         }
 
-        // Paramètres par défaut
         storage.reply ??= true;
         storage.userEdit ??= true;
+        storage.keyboardPopup ??= true;
 
         const self = this;
-
-        // On essaie de patcher le prototype directement pour attraper les futures créations
-        // On cherche le "getter" qui renvoie les params (souvent 'params' ou 'handlers')
         const proto = MessagesHandlers.prototype;
-        const possibleGetters = ["params", "handlers", "_params"];
-        let foundGetter = false;
-
-        for (const prop of possibleGetters) {
-            const descriptor = Object.getOwnPropertyDescriptor(proto, prop);
-            if (descriptor && descriptor.get) {
-                logger.log(`DEBUG: Getter trouvé sur '${prop}'`);
-                foundGetter = true;
-                
-                // On remplace le getter
-                const originalGetter = descriptor.get;
-                Object.defineProperty(proto, prop, {
-                    configurable: true,
-                    get() {
-                        const result = originalGetter.call(this);
-                        // Dès qu'on récupère les handlers, on les patch
-                        if (result) {
-                            self.applyPatchToInstance(result, `getter:${prop}`);
-                        }
-                        return result;
+        
+        // On cherche le getter 'params' (c'est celui qui renvoie l'objet contenant les fonctions)
+        // D'après tes logs, c'est bien 'params'
+        const descriptor = Object.getOwnPropertyDescriptor(proto, "params");
+        
+        if (descriptor && descriptor.get) {
+            const originalGetter = descriptor.get;
+            Object.defineProperty(proto, "params", {
+                configurable: true,
+                get() {
+                    const result = originalGetter.call(this);
+                    if (result) {
+                        // Dès qu'on récupère l'objet, on injecte notre logique
+                        self.applyPatchToInstance(result);
                     }
-                });
+                    return result;
+                }
+            });
 
-                // Nettoyage à la fermeture
-                this.patches.push(() => {
-                    Object.defineProperty(proto, prop, {
-                        configurable: true,
-                        get: originalGetter
-                    });
+            this.patches.push(() => {
+                Object.defineProperty(proto, "params", {
+                    configurable: true,
+                    get: originalGetter
                 });
-                break; // On a trouvé, on arrête
-            }
-        }
-
-        if (!foundGetter) {
-            logger.error("DEBUG: Aucun getter trouvé sur le prototype ! Le patch global a échoué.");
+            });
+        } else {
+            logger.error("BetterChatGestures: Getter 'params' introuvable.");
         }
     },
 
     onUnload() {
-        logger.log("DEBUG: Unloading...");
         this.patches.forEach(p => p());
         this.patches = [];
         this.handlersPatched = new WeakSet();
