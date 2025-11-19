@@ -1,22 +1,21 @@
 import { findByProps, findByStoreName } from "@vendetta/metro";
 import { ReactNative } from "@vendetta/metro/common";
-import { instead } from "@vendetta/patcher";
+import { after, before, instead } from "@vendetta/patcher";
 import { storage, manifest } from "@vendetta/plugin";
 import Settings from "./components/Settings";
+import { DefaultNativeEvent, DoubleTapStateProps, Plugin, NativeEvent } from "./def";
+import { findInReactTree } from "@vendetta/utils";
 import { logger } from "@vendetta";
 
-// --- 1. MODULES (Base Claude) ---
+// Try to find modules with fallbacks
+const ChatInputRef = findByProps("insertText");
 const ChannelStore = findByStoreName("ChannelStore");
 const MessageStore = findByStoreName("MessageStore");
 const UserStore = findByStoreName("UserStore");
 const Messages = findByProps("sendMessage", "startEditMessage");
 const ReplyManager = findByProps("createPendingReply");
-const ChatInputRef = findByProps("insertText");
 
-// Ajout : Le Dispatcher pour bloquer la réaction fantôme
-const FluxDispatcher = findByProps("dispatch", "subscribe");
-
-// --- 2. RECHERCHE ROBUSTE DE MESSAGESHANDLERS (Base Claude) ---
+// Multiple attempts to find MessagesHandlers with different methods
 let MessagesHandlersModule;
 try {
     MessagesHandlersModule = findByProps("MessagesHandlers");
@@ -24,7 +23,7 @@ try {
     logger.warn("BetterChatGestures: Could not find MessagesHandlers via findByProps");
 }
 
-// Fallback (La boucle qui marchait bien chez toi)
+// Fallback: try to find it via class name
 if (!MessagesHandlersModule) {
     try {
         const allModules = window.vendetta?.metro?.cache || new Map();
@@ -42,156 +41,392 @@ if (!MessagesHandlersModule) {
 
 const MessagesHandlers = MessagesHandlersModule?.MessagesHandlers;
 
-// --- STATE ---
-let isBlockingReactions = false;
-let blockingTimeout = null;
-
-const BetterChatGestures = {
+const BetterChatGestures: Plugin = {
+    unpatchGetter: null,
+    unpatchHandlers: null,
+    currentTapIndex: 0,
+    currentMessageID: null,
+    timeoutTap: null,
     patches: [],
     handlersInstances: new WeakSet(),
 
-    // Helper clavier
-    openKeyboard() {
-        if (!storage.keyboardPopup) return;
+    doubleTapState({ state = "UNKNOWN", nativeEvent }: DoubleTapStateProps) {
         try {
-            const ChatInput = ChatInputRef?.refs?.[0]?.current;
-            if (ChatInput?.focus) ChatInput.focus();
-        } catch (error) {}
+            const stateObject = {
+                state,
+                data: nativeEvent
+            };
+
+            if (state === "INCOMPLETE" && nativeEvent) {
+                Object.assign(stateObject, {
+                    reason: {
+                        required: {
+                            taps: 2,
+                            isAuthor: true
+                        },
+                        received: {
+                            taps: nativeEvent.taps,
+                            isAuthor: nativeEvent.isAuthor
+                        }
+                    }
+                });
+            }
+
+            const currentUser = UserStore?.getCurrentUser();
+            if (currentUser && manifest.authors.find(author => author.id === currentUser.id)) {
+                console.log("DoubleTapState", stateObject);
+            }
+        } catch (error) {
+            logger.error("BetterChatGestures: Error in doubleTapState", error);
+        }
     },
 
-    // --- 3. LE PATCH PRINCIPAL (Base Claude + Fix Crash + Fix Return) ---
-    patchHandlers(handlers) {
-        // FIX CRASH : Vérification stricte que c'est un objet avant d'utiliser WeakSet
-        if (!handlers || typeof handlers !== 'object') return;
+    resetTapState() {
+        try {
+            if (this.timeoutTap) {
+                clearTimeout(this.timeoutTap);
+                this.timeoutTap = null;
+            }
+            this.currentTapIndex = 0;
+            this.currentMessageID = null;
+        } catch (error) {
+            logger.error("BetterChatGestures: Error in resetTapState", error);
+        }
+    },
+
+    // Improved keyboard opening function with multiple fallbacks
+    openKeyboard() {
+        if (!storage.keyboardPopup) return;
         
+        try {
+            // Method 1: Try openSystemKeyboard module
+            const keyboardModule = findByProps("openSystemKeyboard");
+            
+            if (keyboardModule?.openSystemKeyboard) {
+                keyboardModule.openSystemKeyboard();
+                return;
+            }
+            
+            if (keyboardModule?.openSystemKeyboardForLastCreatedInput) {
+                keyboardModule.openSystemKeyboardForLastCreatedInput();
+                return;
+            }
+            
+            // Method 2: Try focusing the chat input directly
+            const ChatInput = ChatInputRef?.refs?.[0]?.current;
+            if (ChatInput?.focus) {
+                ChatInput.focus();
+                return;
+            }
+            
+            // Method 3: Try React Native Keyboard API
+            if (ReactNative.Keyboard?.dismiss) {
+                // Dismiss then re-open to force focus
+                setTimeout(() => {
+                    if (ChatInput?.focus) {
+                        ChatInput.focus();
+                    }
+                }, 50);
+            }
+        } catch (error) {
+            // Silently fail - keyboard opening is a nice-to-have feature
+            if (storage.debugMode) {
+                logger.error("BetterChatGestures: Error opening keyboard", error);
+            }
+        }
+    },
+
+    patchHandlers(handlers) {
         if (this.handlersInstances.has(handlers)) return;
         this.handlersInstances.add(handlers);
 
-        if (handlers.handleDoubleTapMessage) {
-            const doubleTapPatch = instead("handleDoubleTapMessage", handlers, (args, orig) => {
-                try {
-                    // 1. On active immédiatement le bouclier anti-réaction
-                    isBlockingReactions = true;
-                    if (blockingTimeout) clearTimeout(blockingTimeout);
-                    blockingTimeout = setTimeout(() => { isBlockingReactions = false; }, 500);
-
-                    if (!args?.[0]?.nativeEvent) return orig.apply(handlers, args);
-                    
-                    const { nativeEvent } = args[0];
-                    const ChannelID = nativeEvent.channelId;
-                    const MessageID = nativeEvent.messageId;
-                    
-                    if (!ChannelID || !MessageID) return orig.apply(handlers, args);
-                    
-                    const channel = ChannelStore?.getChannel(ChannelID);
-                    const message = MessageStore?.getMessage(ChannelID, MessageID);
-                    
-                    if (!message) return orig.apply(handlers, args);
-                    
-                    const currentUser = UserStore?.getCurrentUser();
-                    const isAuthor = currentUser && message.author ? message.author.id === currentUser.id : false;
-                    
-                    // Action Custom
-                    if (isAuthor && storage.userEdit) {
-                        Messages?.startEditMessage(ChannelID, MessageID, message.content || '');
-                    } else if (storage.reply && channel) {
-                        ReplyManager?.createPendingReply({
-                            channel,
-                            message,
-                            shouldMention: true
-                        });
+        try {
+            // Intercept native double-tap handler - handles FAST double taps
+            if (handlers.handleDoubleTapMessage) {
+                const doubleTapPatch = instead("handleDoubleTapMessage", handlers, (args, orig) => {
+                    try {
+                        if (!args?.[0]?.nativeEvent) return;
+                        
+                        const { nativeEvent } = args[0];
+                        const ChannelID = nativeEvent.channelId;
+                        const MessageID = nativeEvent.messageId;
+                        
+                        if (!ChannelID || !MessageID) return;
+                        
+                        const channel = ChannelStore?.getChannel(ChannelID);
+                        const message = MessageStore?.getMessage(ChannelID, MessageID);
+                        
+                        if (!message) return;
+                        
+                        const currentUser = UserStore?.getCurrentUser();
+                        const isAuthor = currentUser && message.author ? message.author.id === currentUser.id : false;
+                        
+                        // Execute custom logic
+                        if (isAuthor && storage.userEdit) {
+                            Messages?.startEditMessage(
+                                ChannelID,
+                                MessageID,
+                                message.content || ''
+                            );
+                        } else if (storage.reply && channel) {
+                            ReplyManager?.createPendingReply({
+                                channel,
+                                message,
+                                shouldMention: true
+                            });
+                        }
+                        
+                        this.openKeyboard();
+                        return;
+                        
+                    } catch (error) {
+                        logger.error("BetterChatGestures: Error in handleDoubleTapMessage patch", error);
                     }
-                    
-                    this.openKeyboard();
-                    
-                    // FIX RETURN : On retourne true pour dire au système "C'est bon, j'ai géré"
-                    // C'est souvent ce qui manquait pour empêcher la propagation native
-                    return true;
-                    
+                });
+                
+                this.patches.push(doubleTapPatch);
+            }
+
+            // Patch username tapping
+            if (handlers.handleTapUsername && storage.tapUsernameMention) {
+                const tapUsernamePatch = instead("handleTapUsername", handlers, (args, orig) => {
+                    try {
+                        if (!storage.tapUsernameMention) return orig.apply(handlers, args);
+                        if (!args?.[0]?.nativeEvent) return orig.apply(handlers, args);
+
+                        const ChatInput = ChatInputRef?.refs?.[0]?.current;
+                        const { messageId } = args[0].nativeEvent;
+                        
+                        if (!ChatInput?.props?.channel?.id) return orig.apply(handlers, args);
+
+                        const message = MessageStore.getMessage(
+                            ChatInput.props.channel.id,
+                            messageId
+                        );
+
+                        if (!message?.author) return orig.apply(handlers, args);
+                        
+                        const discriminatorText = message.author.discriminator !== "0" 
+                            ? `#${message.author.discriminator}` 
+                            : '';
+                        ChatInputRef.insertText(`@${message.author.username}${discriminatorText}`);
+                    } catch (error) {
+                        logger.error("BetterChatGestures: Error in handleTapUsername patch", error);
+                        return orig.apply(handlers, args);
+                    }
+                });
+                this.patches.push(tapUsernamePatch);
+            }
+
+            // Patch tap message - handles SLOW double taps
+            if (handlers.handleTapMessage) {
+                const tapMessagePatch = after("handleTapMessage", handlers, (args) => {
+                    try {
+                        if (!args?.[0]) return;
+                        
+                        const { nativeEvent }: { nativeEvent: DefaultNativeEvent } = args[0];
+                        if (!nativeEvent) return;
+                        
+                        const ChannelID = nativeEvent.channelId;
+                        const MessageID = nativeEvent.messageId;
+                        if (!ChannelID || !MessageID) return;
+
+                        const channel = ChannelStore?.getChannel(ChannelID);
+                        const message = MessageStore?.getMessage(ChannelID, MessageID);
+
+                        if (!message) return;
+
+                        // Track taps
+                        if (this.currentMessageID === MessageID) {
+                            this.currentTapIndex++;
+                        } else {
+                            this.resetTapState();
+                            this.currentTapIndex = 1;
+                            this.currentMessageID = MessageID;
+                        }
+
+                        let delayMs = 1000;
+                        if (storage.delay) {
+                            const parsedDelay = parseInt(storage.delay, 10);
+                            if (!isNaN(parsedDelay) && parsedDelay >= 200) {
+                                delayMs = parsedDelay;
+                            }
+                        }
+                        
+                        if (this.timeoutTap) {
+                            clearTimeout(this.timeoutTap);
+                        }
+                        
+                        this.timeoutTap = setTimeout(() => {
+                            this.resetTapState();
+                        }, delayMs);
+
+                        const currentUser = UserStore?.getCurrentUser();
+                        const isAuthor = currentUser && message.author ? message.author.id === currentUser.id : false;
+
+                        const enrichedNativeEvent = {
+                            ...nativeEvent,
+                            taps: this.currentTapIndex,
+                            content: message.content || '',
+                            authorId: message.author?.id,
+                            isAuthor
+                        };
+
+                        if (this.currentTapIndex !== 2) {
+                            this.doubleTapState({
+                                state: "INCOMPLETE",
+                                nativeEvent: enrichedNativeEvent
+                            });
+                            return;
+                        }
+
+                        // Double tap detected!
+                        const currentMessageID = this.currentMessageID;
+                        this.resetTapState();
+
+                        if (isAuthor) {
+                            if (storage.userEdit) {
+                                Messages?.startEditMessage(
+                                    ChannelID,
+                                    currentMessageID,
+                                    enrichedNativeEvent.content
+                                );
+                            } else if (storage.reply && channel) {
+                                ReplyManager?.createPendingReply({
+                                    channel,
+                                    message,
+                                    shouldMention: true
+                                });
+                            }
+                        } else if (storage.reply && channel) {
+                            ReplyManager?.createPendingReply({
+                                channel,
+                                message,
+                                shouldMention: true
+                            });
+                        }
+
+                        this.openKeyboard();
+
+                        this.doubleTapState({
+                            state: "COMPLETE",
+                            nativeEvent: enrichedNativeEvent
+                        });
+                    } catch (error) {
+                        logger.error("BetterChatGestures: Error in handleTapMessage patch", error);
+                        this.resetTapState();
+                    }
+                });
+                this.patches.push(tapMessagePatch);
+            }
+
+            this.unpatchHandlers = () => {
+                try {
+                    this.patches.forEach(unpatch => {
+                        if (typeof unpatch === 'function') {
+                            unpatch();
+                        }
+                    });
+                    this.patches = [];
+                    this.handlersInstances = new WeakSet();
                 } catch (error) {
-                    logger.error("BetterChatGestures: Error in handleDoubleTapMessage patch", error);
-                    isBlockingReactions = false; // On baisse le bouclier en cas d'erreur
-                    return orig.apply(handlers, args);
+                    logger.error("BetterChatGestures: Error in unpatchHandlers", error);
                 }
-            });
-            
-            this.patches.push(doubleTapPatch);
+            };
+        } catch (error) {
+            logger.error("BetterChatGestures: Error in patchHandlers", error);
         }
     },
 
     onLoad() {
-        if (!MessagesHandlers) {
-            logger.error("BetterChatGestures: Plugin will not work (MessagesHandlers missing).");
-            return;
-        }
-
-        storage.reply ??= true;
-        storage.userEdit ??= true;
-        storage.keyboardPopup ??= true;
-        
-        const self = this;
-
-        // --- 4. PATCH DU DISPATCHER (Le "Silencieux") ---
-        // C'est ça qui va tuer la réaction de la "première fois"
-        if (FluxDispatcher) {
-            const dispatchPatch = instead("dispatch", FluxDispatcher, (args, orig) => {
-                const event = args[0];
-                // Si le bouclier est levé ET que c'est une réaction ajoutée
-                if (isBlockingReactions && event && event.type === "MESSAGE_REACTION_ADD") {
-                    // On bloque silencieusement
-                    return; 
-                }
-                return orig.apply(FluxDispatcher, args);
-            });
-            this.patches.push(dispatchPatch);
-        }
-
-        // --- 5. INJECTION DANS LE GETTER (Base Claude) ---
-        const possiblePropertyNames = ["params", "handlers", "_params", "messageHandlers"];
-        let origGetParams = null;
-        let usedPropertyName = null;
-        
-        for (const propName of possiblePropertyNames) {
-            origGetParams = Object.getOwnPropertyDescriptor(MessagesHandlers.prototype, propName)?.get;
-            if (origGetParams) {
-                usedPropertyName = propName;
-                break;
+        try {
+            if (!MessagesHandlers) {
+                logger.error("BetterChatGestures: MessagesHandlers module not found! Plugin will not work.");
+                return;
             }
-        }
-        
-        if (origGetParams && usedPropertyName) {
-            Object.defineProperty(MessagesHandlers.prototype, usedPropertyName, {
-                configurable: true,
-                get() {
-                    // On récupère les handlers originaux
-                    const handlers = origGetParams.call(this);
-                    // On tente de patcher (avec la sécurité anti-crash ajoutée dans patchHandlers)
-                    if (handlers) {
-                        self.patchHandlers.call(self, handlers);
-                    }
-                    return handlers;
-                }
+
+            storage.tapUsernameMention ??= ReactNative.Platform.select({
+                android: false,
+                ios: true,
+                default: true
             });
             
-            this.patches.push(() => {
-                try {
-                    if (origGetParams && usedPropertyName) {
-                        Object.defineProperty(MessagesHandlers.prototype, usedPropertyName, {
-                            configurable: true,
-                            get: origGetParams
-                        });
+            if (ReactNative.Platform.OS === 'android') {
+                storage.tapUsernameMention = false;
+            }
+            
+            storage.reply ??= true;
+            storage.userEdit ??= true;
+            storage.keyboardPopup ??= true;
+            storage.delay ??= "1000";
+            storage.debugMode ??= false;
+            
+            // Validate delay with minimum of 200ms
+            if (!storage.delay || storage.delay === "" || isNaN(parseInt(storage.delay, 10)) || parseInt(storage.delay, 10) < 200) {
+                storage.delay = "1000";
+            }
+            
+            logger.log("BetterChatGestures: initialized with delay =", storage.delay);
+            
+            const self = this;
+            
+            // Try multiple property names
+            const possiblePropertyNames = ["params", "handlers", "_params", "messageHandlers"];
+            let origGetParams = null;
+            let usedPropertyName = null;
+            
+            for (const propName of possiblePropertyNames) {
+                origGetParams = Object.getOwnPropertyDescriptor(MessagesHandlers.prototype, propName)?.get;
+                if (origGetParams) {
+                    usedPropertyName = propName;
+                    logger.log(`BetterChatGestures: Found property '${propName}'`);
+                    break;
+                }
+            }
+            
+            if (origGetParams && usedPropertyName) {
+                Object.defineProperty(MessagesHandlers.prototype, usedPropertyName, {
+                    configurable: true,
+                    get() {
+                        if (this) self.patchHandlers.call(self, this);
+                        return origGetParams.call(this);
                     }
-                } catch (e) {}
-            });
+                });
+                
+                this.unpatchGetter = () => {
+                    try {
+                        if (origGetParams && usedPropertyName) {
+                            Object.defineProperty(MessagesHandlers.prototype, usedPropertyName, {
+                                configurable: true,
+                                get: origGetParams
+                            });
+                        }
+                    } catch (error) {
+                        logger.error("BetterChatGestures: Error in unpatchGetter", error);
+                    }
+                };
+            } else {
+                logger.error("BetterChatGestures: Could not find params getter!");
+            }
+        } catch (error) {
+            logger.error("BetterChatGestures: Error in onLoad", error);
         }
     },
 
     onUnload() {
-        this.patches.forEach(unpatch => unpatch?.());
-        this.patches = [];
-        this.handlersInstances = new WeakSet();
-        isBlockingReactions = false;
-        if (blockingTimeout) clearTimeout(blockingTimeout);
+        try {
+            this.resetTapState();
+            
+            if (this.unpatchGetter) this.unpatchGetter();
+            if (this.unpatchHandlers) this.unpatchHandlers();
+            
+            if (this.timeoutTap) {
+                clearTimeout(this.timeoutTap);
+                this.timeoutTap = null;
+            }
+        } catch (error) {
+            logger.error("BetterChatGestures: Error in onUnload", error);
+        }
     },
 
     settings: Settings
