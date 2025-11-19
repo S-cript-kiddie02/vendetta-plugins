@@ -145,18 +145,19 @@ const BetterChatGestures: Plugin = {
             if (handlers.handleDoubleTapMessage) {
                 const doubleTapPatch = instead("handleDoubleTapMessage", handlers, (args, orig) => {
                     try {
-                        if (!args?.[0]?.nativeEvent) return;
+                        // FIX: Si pas d'event, on retourne true pour bloquer quand même l'action par défaut
+                        if (!args?.[0]?.nativeEvent) return true;
                         
                         const { nativeEvent } = args[0];
                         const ChannelID = nativeEvent.channelId;
                         const MessageID = nativeEvent.messageId;
                         
-                        if (!ChannelID || !MessageID) return;
+                        if (!ChannelID || !MessageID) return true; // FIX: Return true to consume event
                         
                         const channel = ChannelStore?.getChannel(ChannelID);
                         const message = MessageStore?.getMessage(ChannelID, MessageID);
                         
-                        if (!message) return;
+                        if (!message) return true; // FIX: Return true
                         
                         const currentUser = UserStore?.getCurrentUser();
                         const isAuthor = currentUser && message.author ? message.author.id === currentUser.id : false;
@@ -177,10 +178,11 @@ const BetterChatGestures: Plugin = {
                         }
                         
                         this.openKeyboard();
-                        return;
+                        return true; // FIX: CRITIQUE - Toujours retourner true pour dire "j'ai géré l'événement, ne fais rien d'autre"
                         
                     } catch (error) {
                         logger.error("BetterChatGestures: Error in handleDoubleTapMessage patch", error);
+                        return true; // FIX: En cas d'erreur, on bloque quand même pour éviter la réaction intempestive
                     }
                 });
                 
@@ -210,6 +212,7 @@ const BetterChatGestures: Plugin = {
                             ? `#${message.author.discriminator}` 
                             : '';
                         ChatInputRef.insertText(`@${message.author.username}${discriminatorText}`);
+                        return true; // FIX: Return true if handled
                     } catch (error) {
                         logger.error("BetterChatGestures: Error in handleTapUsername patch", error);
                         return orig.apply(handlers, args);
@@ -272,6 +275,8 @@ const BetterChatGestures: Plugin = {
                             isAuthor
                         };
 
+                        // FIX: Si native handler a déjà fait le job (via handleDoubleTapMessage patché), on reset
+                        // Mais ici c'est pour le SLOW double tap
                         if (this.currentTapIndex !== 2) {
                             this.doubleTapState({
                                 state: "INCOMPLETE",
@@ -388,6 +393,8 @@ const BetterChatGestures: Plugin = {
                 Object.defineProperty(MessagesHandlers.prototype, usedPropertyName, {
                     configurable: true,
                     get() {
+                        // FIX: Apply patch BEFORE calling original getter to ensure references are updated if possible
+                        // Though 'this' is the instance, patching it here is correct.
                         if (this) self.patchHandlers.call(self, this);
                         return origGetParams.call(this);
                     }

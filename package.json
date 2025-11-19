@@ -6,7 +6,8 @@
 	},
 	"dependencies": {
 		"@nexpid/vdp-shared": "^1.0.2",
-		"@swc/helpers": "^0.5.17"
+		"@swc/helpers": "^0.5.17",
+		"pnpm": "^10.22.0"
 	},
 	"devDependencies": {
 		"@rollup/plugin-commonjs": "^28.0.6",
