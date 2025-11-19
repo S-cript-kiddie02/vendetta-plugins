@@ -12,27 +12,13 @@ const Messages = findByProps("sendMessage", "startEditMessage");
 const ReplyManager = findByProps("createPendingReply");
 const ChatInputRef = findByProps("insertText");
 
-// Le Cerveau de Discord (Dispatcher)
+// Module HTTP pour supprimer la réaction côté serveur (API)
+const RestAPI = findByProps("get", "post", "put", "del");
+
+// Le Cerveau (Dispatcher)
 const FluxDispatcher = findByProps("dispatch", "subscribe");
 
-// Recherche sécurisée de MessagesHandlers
-let MessagesHandlersModule = findByProps("MessagesHandlers");
-if (!MessagesHandlersModule) {
-    const allModules = window.vendetta?.metro?.cache || new Map();
-    for (const [_, module] of allModules) {
-        if (module?.exports?.MessagesHandlers) {
-            MessagesHandlersModule = module.exports;
-            break;
-        }
-    }
-}
-const MessagesHandlers = MessagesHandlersModule?.MessagesHandlers;
-
-// --- STATE ---
-// Ce verrou indique si on doit bloquer les événements de réaction entrants
-let isBlockingReactions = false;
-let blockingTimeout = null;
-
+// --- HELPERS ---
 function openKeyboard() {
     try {
         const ChatInput = ChatInputRef?.refs?.[0]?.current;
@@ -40,75 +26,21 @@ function openKeyboard() {
     } catch (e) {}
 }
 
+// Formatter l'emoji pour l'API Discord
+function formatEmojiForApi(emoji) {
+    if (!emoji) return null;
+    if (emoji.id) {
+        return `${emoji.name}:${emoji.id}`; // Emoji custom
+    }
+    return emoji.name; // Emoji unicode
+}
+
 const BetterChatGestures = {
     patches: [],
-    handlersInstances: new WeakSet(),
-
-    // Fonction pour activer le bouclier pendant 500ms
-    activateReactionBlocker() {
-        isBlockingReactions = true;
-        if (blockingTimeout) clearTimeout(blockingTimeout);
-        blockingTimeout = setTimeout(() => {
-            isBlockingReactions = false;
-        }, 500); // 500ms suffit largement pour bloquer l'event natif
-    },
-
-    patchHandlers(handlers) {
-        // SÉCURITÉ ANTI-CRASH (WeakSet TypeError)
-        if (!handlers || typeof handlers !== 'object') return;
-        
-        if (this.handlersInstances.has(handlers)) return;
-        this.handlersInstances.add(handlers);
-
-        // On patche le handler déclenché par l'option Dev
-        if (handlers.handleDoubleTapMessage) {
-            const patch = instead("handleDoubleTapMessage", handlers, (args, orig) => {
-                try {
-                    const event = args[0];
-                    if (!event || !event.nativeEvent) return orig.apply(handlers, args);
-
-                    const { channelId, messageId } = event.nativeEvent;
-
-                    // 1. On active le pare-feu FLUX
-                    this.activateReactionBlocker();
-
-                    const message = MessageStore.getMessage(channelId, messageId);
-                    const channel = ChannelStore.getChannel(channelId);
-                    const currentUser = UserStore.getCurrentUser();
-
-                    if (!message || !currentUser) {
-                         // Si on ne peut rien faire, on laisse tomber le blocage
-                         isBlockingReactions = false;
-                         return orig.apply(handlers, args);
-                    }
-
-                    const isAuthor = message.author.id === currentUser.id;
-
-                    // 2. Action Custom (Edit ou Reply)
-                    if (isAuthor && storage.userEdit) {
-                        Messages.startEditMessage(channelId, messageId, message.content || "");
-                    } else if (storage.reply) {
-                        ReplyManager.createPendingReply({ channel, message, shouldMention: true });
-                    }
-
-                    openKeyboard();
-
-                    // 3. On retourne true pour signaler que c'est géré
-                    return true;
-
-                } catch (e) {
-                    logger.error("BetterChatGestures: Erreur handler", e);
-                    isBlockingReactions = false;
-                    return orig.apply(handlers, args);
-                }
-            });
-            this.patches.push(patch);
-        }
-    },
 
     onLoad() {
-        if (!MessagesHandlers || !FluxDispatcher) {
-            logger.error("BetterChatGestures: Modules critiques introuvables.");
+        if (!FluxDispatcher || !RestAPI) {
+            logger.error("BetterChatGestures: Modules critiques (Dispatcher/HTTP) introuvables.");
             return;
         }
 
@@ -116,48 +48,76 @@ const BetterChatGestures = {
         storage.userEdit ??= true;
 
         const self = this;
+        const currentUser = UserStore.getCurrentUser();
 
-        // --- PATCH 1 : INTERCEPTION DU GESTE (Source) ---
-        const proto = MessagesHandlers.prototype;
-        const descriptor = Object.getOwnPropertyDescriptor(proto, "params");
-
-        if (descriptor && descriptor.get) {
-            const origGet = descriptor.get;
-            Object.defineProperty(proto, "params", {
-                configurable: true,
-                get() {
-                    const handlers = origGet.call(this);
-                    if (handlers) self.patchHandlers(handlers);
-                    return handlers;
-                }
-            });
-            this.patches.push(() => {
-                Object.defineProperty(proto, "params", { configurable: true, get: origGet });
-            });
-        }
-
-        // --- PATCH 2 : LE PARE-FEU (Dispatcher) ---
-        // C'est ici qu'on tue la réaction
+        // --- LE GRAND DÉTOURNEMENT ---
+        // On surveille tout ce qui se passe. Si une réaction est ajoutée par "Moi", on agit.
         const dispatchPatch = instead("dispatch", FluxDispatcher, (args, orig) => {
             const event = args[0];
             
-            // Si le bouclier est levé ET que c'est un événement d'ajout de réaction
-            if (isBlockingReactions && event && event.type === "MESSAGE_REACTION_ADD") {
-                logger.log("🛡️ BetterChatGestures: Réaction native bloquée avec succès !");
-                return; // ON TUE L'ÉVÉNEMENT (il n'arrivera jamais au store)
+            // On cherche un événement d'ajout de réaction
+            if (event && event.type === "MESSAGE_REACTION_ADD") {
+                
+                // Vérification : Est-ce que c'est MOI qui ajoute la réaction ?
+                // Note: event.userId est le standard, parfois c'est user_id selon les versions
+                const userId = event.userId || event.user_id;
+                const meId = currentUser?.id;
+
+                if (userId === meId) {
+                    // C'EST UN DÉCLENCHEMENT POTENTIEL !
+                    // On considère que tout ajout de réaction est une tentative de geste
+                    // (Inconvénient : ça bloquera aussi tes réactions manuelles faites très vite, 
+                    // mais c'est le prix à payer pour contourner le bug natif)
+
+                    const { channelId, messageId, emoji } = event;
+                    const message = MessageStore.getMessage(channelId, messageId);
+                    const channel = ChannelStore.getChannel(channelId);
+
+                    if (message) {
+                        const isAuthor = message.author.id === meId;
+                        let actionTriggered = false;
+
+                        // 1. Lancer l'action (Edit ou Reply)
+                        if (isAuthor && storage.userEdit) {
+                            Messages.startEditMessage(channelId, messageId, message.content || "");
+                            actionTriggered = true;
+                        } else if (storage.reply) {
+                            ReplyManager.createPendingReply({ channel, message, shouldMention: true });
+                            actionTriggered = true;
+                        }
+
+                        if (actionTriggered) {
+                            logger.log("BetterChatGestures: Réaction interceptée et convertie en action !");
+                            openKeyboard();
+
+                            // 2. NETTOYAGE API (Supprimer la réaction côté serveur)
+                            // On envoie une requête DELETE silencieuse
+                            const emojiCode = formatEmojiForApi(emoji);
+                            if (emojiCode) {
+                                RestAPI.del({
+                                    url: `/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emojiCode)}/@me`
+                                }).catch(e => {
+                                    // On ignore les erreurs (parfois la réaction n'est même pas encore arrivée au serveur)
+                                });
+                            }
+
+                            // 3. BLOQUAGE LOCAL (On empêche l'événement d'atteindre l'écran)
+                            return; 
+                        }
+                    }
+                }
             }
 
             return orig.apply(FluxDispatcher, args);
         });
+
         this.patches.push(dispatchPatch);
+        logger.log("BetterChatGestures: Intercepteur de réactions activé.");
     },
 
     onUnload() {
         this.patches.forEach(p => p());
         this.patches = [];
-        this.handlersInstances = new WeakSet();
-        isBlockingReactions = false;
-        if (blockingTimeout) clearTimeout(blockingTimeout);
     },
 
     settings: Settings
