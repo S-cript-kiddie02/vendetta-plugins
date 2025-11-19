@@ -3,18 +3,18 @@ import Settings from "./components/Settings";
 
 const BetterChatGestures = {
     onLoad() {
-        logger.log("SEARCHER: Démarrage de la recherche globale...");
+        logger.log("BRUTEFORCE: Démarrage de la recherche approfondie...");
 
         const cache = window.vendetta?.metro?.cache || new Map();
-        let foundCount = 0;
+        const foundHandlers = [];
 
-        // On parcourt TOUS les modules de l'application
+        // On parcourt absolument tout
         for (const [id, module] of cache) {
             if (!module || !module.exports) continue;
 
             const exports = module.exports;
             
-            // On vérifie l'export direct, le default, et les prototypes
+            // On vérifie les exports directs, le default, et les prototypes
             const candidates = [
                 { name: "exports", obj: exports },
                 { name: "default", obj: exports.default },
@@ -25,29 +25,46 @@ const BetterChatGestures = {
             for (const { name, obj } of candidates) {
                 if (!obj) continue;
 
-                // On cherche des noms de fonctions clés
-                // On cherche large pour être sûr de trouver
-                const keys = Object.keys(obj);
-                const hasTapMessage = keys.some(k => k === "handleTapMessage" || k === "onTapMessage" || k === "onMessageTap");
-                const hasLongPress = keys.some(k => k === "handleLongPressMessage");
-                
-                if (hasTapMessage || hasLongPress) {
-                    foundCount++;
-                    logger.log(`SEARCHER [FOUND] Module ID: ${id} | Location: ${name}`);
-                    logger.log(`SEARCHERKeys: ${keys.filter(k => k.toLowerCase().includes("message")).join(", ")}`);
+                try {
+                    const keys = Object.keys(obj);
                     
-                    // Si on trouve, on essaie de voir si c'est le bon
-                    if (obj.handleTapMessage) {
-                         logger.log("SEARCHER: BINGO! handleTapMessage existe ici!");
+                    // On cherche tout ce qui ressemble à un clic sur un message
+                    // Critères : commence par "handle" ou "on", et contient "Tap" ou "Press"
+                    const interestingKeys = keys.filter(k => 
+                        (k.startsWith("handle") || k.startsWith("on")) && 
+                        (k.toLowerCase().includes("tap") || k.toLowerCase().includes("press"))
+                    );
+
+                    if (interestingKeys.length > 0) {
+                        // Pour filtrer le bruit, on garde ceux qui ont l'air pertinents pour le CHAT
+                        // (souvent accompagnés de logic message/channel)
+                        const hasChatContext = keys.some(k => 
+                            k.toLowerCase().includes("message") || 
+                            k.toLowerCase().includes("channel") ||
+                            k.toLowerCase().includes("row")
+                        );
+
+                        if (hasChatContext) {
+                            foundHandlers.push({
+                                id,
+                                location: name,
+                                keys: interestingKeys.join(", ")
+                            });
+                            
+                            logger.log(`CANDIDAT TROUVÉ [ID: ${id}]:`);
+                            logger.log(`Keys: ${interestingKeys.join(", ")}`);
+                        }
                     }
+                } catch (e) {
+                    // Ignorer les erreurs d'accès
                 }
             }
         }
 
-        if (foundCount === 0) {
-            logger.error("SEARCHER: Aucun module trouvé avec handleTapMessage ! La fonction a été renommée.");
+        if (foundHandlers.length === 0) {
+            logger.error("BRUTEFORCE: Rien trouvé... Ils ont tout caché dans le Natif.");
         } else {
-            logger.log(`SEARCHER: Recherche terminée. ${foundCount} candidats trouvés.`);
+            logger.log(`BRUTEFORCE: Finie. ${foundHandlers.length} modules potentiels trouvés.`);
         }
     },
 
