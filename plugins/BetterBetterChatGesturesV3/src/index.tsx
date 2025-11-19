@@ -1,4 +1,5 @@
 import { findByProps, findByStoreName } from "@vendetta/metro";
+import { ReactNative } from "@vendetta/metro/common";
 import { instead } from "@vendetta/patcher";
 import { storage, manifest } from "@vendetta/plugin";
 import Settings from "./components/Settings";
@@ -12,39 +13,29 @@ const Messages = findByProps("sendMessage", "startEditMessage");
 const ReplyManager = findByProps("createPendingReply");
 const ChatInputRef = findByProps("insertText");
 
-// On cherche le module qui gère les réactions pour le bloquer
+// Module pour bloquer la réaction native
 const ReactionModule = findByProps("addReaction");
 
-// --- RECHERCHE DU GESTURE MODULE (SMART SEARCH) ---
-// On cherche un module qui possède à la fois handleTap et handleLongPress
-// C'est la signature unique du gestionnaire de liste de messages
-let GestureModule;
+// Module principal (comme dans le code original)
+let MessagesHandlersModule = findByProps("MessagesHandlers");
 
-const findGestureModule = () => {
-    if (GestureModule) return GestureModule;
-
-    const cache = window.vendetta?.metro?.cache || new Map();
-    for (const [_, module] of cache) {
-        const exports = module?.exports;
-        if (!exports) continue;
-
-        // On vérifie exports, default et prototype
-        const candidates = [exports, exports.default, exports.prototype];
-        
-        for (const obj of candidates) {
-            if (obj && typeof obj.handleTap === 'function' && typeof obj.handleLongPress === 'function') {
-                logger.log("BetterChatGestures: Module de gestes trouvé via signature (handleTap + handleLongPress) !");
-                return obj;
-            }
+// Fallback cache (au cas où)
+if (!MessagesHandlersModule) {
+    const allModules = window.vendetta?.metro?.cache || new Map();
+    for (const [_, module] of allModules) {
+        if (module?.exports?.MessagesHandlers) {
+            MessagesHandlersModule = module.exports;
+            break;
         }
     }
-    return null;
-};
+}
+
+const MessagesHandlers = MessagesHandlersModule?.MessagesHandlers;
 
 // --- STATE ---
-let isHandlingGesture = false; // Verrou pour bloquer la réaction native
+// C'est ce verrou qui va empêcher la réaction d'apparaître
+let isHandlingGesture = false;
 
-// Helper clavier
 function openKeyboard() {
     try {
         const ChatInput = ChatInputRef?.refs?.[0]?.current;
@@ -54,86 +45,120 @@ function openKeyboard() {
 
 const BetterChatGestures = {
     patches: [],
-    
-    onLoad() {
-        // 1. Trouver le module
-        GestureModule = findGestureModule();
+    handlersInstances: new WeakSet(),
 
-        if (!GestureModule) {
-            logger.error("BetterChatGestures: FATAL - Impossible de trouver le module de gestes, même par signature.");
+    // Cette fonction patche l'objet handlers récupéré via le getter
+    patchHandlers(handlers) {
+        if (this.handlersInstances.has(handlers)) return;
+        this.handlersInstances.add(handlers);
+
+        // On reprend exactement le handler mentionné par Claude
+        if (handlers.handleDoubleTapMessage) {
+            const patch = instead("handleDoubleTapMessage", handlers, (args, orig) => {
+                try {
+                    const event = args[0];
+                    if (!event || !event.nativeEvent) return orig.apply(handlers, args);
+
+                    const { channelId, messageId } = event.nativeEvent;
+                    
+                    // 1. ON LÈVE LE BOUCLIER IMMÉDIATEMENT
+                    isHandlingGesture = true;
+                    
+                    // On le baisse après 500ms (le temps que le moteur natif se calme)
+                    setTimeout(() => { isHandlingGesture = false; }, 500);
+
+                    const message = MessageStore.getMessage(channelId, messageId);
+                    const channel = ChannelStore.getChannel(channelId);
+                    const currentUser = UserStore.getCurrentUser();
+
+                    if (!message || !currentUser) return;
+
+                    const isAuthor = message.author.id === currentUser.id;
+
+                    // Action du plugin
+                    if (isAuthor && storage.userEdit) {
+                        Messages.startEditMessage(channelId, messageId, message.content || "");
+                    } else if (storage.reply) {
+                        ReplyManager.createPendingReply({ channel, message, shouldMention: true });
+                    }
+
+                    openKeyboard();
+
+                    // On retourne true pour dire "J'ai géré l'event"
+                    return true;
+
+                } catch (e) {
+                    logger.error("BetterChatGestures: Error in handleDoubleTapMessage", e);
+                    // En cas d'erreur, on laisse faire l'original pour pas casser l'app
+                    return orig.apply(handlers, args);
+                }
+            });
+            this.patches.push(patch);
+            logger.log("BetterChatGestures: handleDoubleTapMessage patché avec succès.");
+        }
+    },
+
+    onLoad() {
+        if (!MessagesHandlers) {
+            logger.error("BetterChatGestures: MessagesHandlers introuvable !");
             return;
         }
 
-        // Paramètres par défaut
         storage.reply ??= true;
         storage.userEdit ??= true;
 
-        // 2. Patcher addReaction pour empêcher le bug de la "première fois"
-        // Si on détecte que c'est nous qui gérons le tap, on bloque l'ajout de réaction
+        const self = this;
+
+        // 1. PATCH DU GETTER 'params' (Méthode Claude)
+        // C'est ça qui permet de choper les handlers au bon moment
+        const proto = MessagesHandlers.prototype;
+        const descriptor = Object.getOwnPropertyDescriptor(proto, "params");
+
+        if (descriptor && descriptor.get) {
+            const origGet = descriptor.get;
+            Object.defineProperty(proto, "params", {
+                configurable: true,
+                get() {
+                    // On récupère l'objet handlers
+                    const handlers = origGet.call(this);
+                    if (handlers) {
+                        // On applique notre patch dessus
+                        self.patchHandlers(handlers);
+                    }
+                    return handlers;
+                }
+            });
+
+            this.patches.push(() => {
+                Object.defineProperty(proto, "params", {
+                    configurable: true,
+                    get: origGet
+                });
+            });
+        } else {
+            logger.error("BetterChatGestures: Getter 'params' introuvable sur MessagesHandlers.");
+        }
+
+        // 2. PATCH BLOQUEUR DE RÉACTION
+        // C'est la correction spécifique pour ton bug
         if (ReactionModule && ReactionModule.addReaction) {
             const reactionPatch = instead("addReaction", ReactionModule, (args, orig) => {
                 if (isHandlingGesture) {
-                    logger.log("BetterChatGestures: Réaction native bloquée avec succès !");
-                    return; // On ne fait rien, on annule la réaction
+                    logger.log("BetterChatGestures: Réaction native bloquée par le plugin !");
+                    return; // On ne fait RIEN, ce qui annule la réaction
                 }
                 return orig.apply(ReactionModule, args);
             });
             this.patches.push(reactionPatch);
+        } else {
+            logger.warn("BetterChatGestures: Module addReaction introuvable, le fix de réaction ne marchera pas.");
         }
-
-        // 3. Patcher handleTap (C'est le handler du Double Tap via l'option Dev)
-        // Note: Avec l'option dev, "handleTap" est appelé pour le double tap
-        const tapPatch = instead("handleTap", GestureModule, (args, orig) => {
-            try {
-                const event = args[0];
-                // Sécurité
-                if (!event || !event.nativeEvent) return orig.apply(GestureModule, args);
-
-                const { messageId, channelId } = event.nativeEvent;
-                
-                // On récupère les infos
-                const message = MessageStore.getMessage(channelId, messageId);
-                const channel = ChannelStore.getChannel(channelId);
-                const currentUser = UserStore.getCurrentUser();
-
-                if (!message || !currentUser) return orig.apply(GestureModule, args);
-
-                // ACTION PLUGIN
-                // On active le verrou pour bloquer addReaction
-                isHandlingGesture = true;
-                
-                // On désactive le verrou après 500ms (le temps que le natif se calme)
-                setTimeout(() => { isHandlingGesture = false; }, 500);
-
-                const isAuthor = message.author.id === currentUser.id;
-                logger.log(`Action déclenchée (Auteur: ${isAuthor})`);
-
-                if (isAuthor && storage.userEdit) {
-                    Messages.startEditMessage(channelId, messageId, message.content || "");
-                } else if (storage.reply) {
-                    ReplyManager.createPendingReply({ channel, message, shouldMention: true });
-                }
-                
-                openKeyboard();
-
-                // On retourne true pour essayer de bloquer la propagation JS (si possible)
-                return true; 
-
-            } catch (e) {
-                logger.error("Error in handleTap patch", e);
-                isHandlingGesture = false; // Sécurité
-                return orig.apply(GestureModule, args);
-            }
-        });
-
-        this.patches.push(tapPatch);
-        logger.log("BetterChatGestures: Chargé et opérationnel.");
     },
 
     onUnload() {
         this.patches.forEach(p => p());
         this.patches = [];
-        GestureModule = null;
+        this.handlersInstances = new WeakSet();
         isHandlingGesture = false;
     },
 
